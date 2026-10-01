@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no">
+    <title>台中一中 GTA</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🎮</text></svg>">
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div id="game-container">
+        <div id="loading-screen">
+            <h1>台中一中 GTA</h1>
+            <p>載入中...</p>
+            <div class="loading-bar">
+                <div class="loading-progress"></div>
+            </div>
+        </div>
+        
+        <div id="ui-overlay">
+            <div id="minimap"></div>
+            <div id="map-credit">Map data © OpenStreetMap contributors</div>
+            <div id="player-info">
+                <div class="health-bar">
+                    <div class="health-fill"></div>
+                </div>
+                <div class="player-name">玩家</div>
+            </div>
+            <div id="controls-hint">
+                <div class="control-item">WASD - 移動</div>
+                <div class="control-item">Shift - 奔跑</div>
+                <div class="control-item">Space - 跳躍</div>
+                <div class="control-item">M - 地圖</div>
+            </div>
+        </div>
+        
+        <!-- 手機觸控控制器 -->
+        <div id="mobile-controls" class="hidden">
+            <div id="joystick-container">
+                <div id="joystick-base">
+                    <div id="joystick-stick"></div>
+                </div>
+            </div>
+            <div id="action-buttons">
+                <button id="jump-btn" class="action-btn">跳躍</button>
+                <button id="sprint-btn" class="action-btn">奔跑</button>
+            </div>
+        </div>
+        
+        <div id="game-menu" class="hidden">
+            <h2>遊戲選單</h2>
+            <button id="resume-btn">繼續遊戲</button>
+            <button id="settings-btn">設定</button>
+            <button id="exit-btn">退出</button>
+        </div>
+    </div>
+    
+    <script type="module">
+        import * as THREE from './three.module.js';
+        window.THREE = THREE;
+        if (window.initGame) {
+            window.initGame();
+        }
+    </script>
+    <script>
+        window.initGame = function initGame() {
+            if (window.__gameStarted) return;
+            window.__gameStarted = true;
+            if (typeof THREE !== 'undefined') {
+                console.log('Three.js loaded successfully from local module');
+                const gameScript = document.createElement('script');
+                gameScript.src = 'game.js';
+                document.body.appendChild(gameScript);
+            } else {
+                console.error('Three.js failed to load locally');
+                document.getElementById('loading-screen').innerHTML = `
+                    <h1>遊戲載入失敗</h1>
+                    <p>Three.js 本地載入失敗，請確認檔案是否存在</p>
+                    <button onclick="location.reload()" style="padding: 10px 20px; margin-top: 20px; cursor: pointer;">重新載入</button>
+                `;
+            }
+        };
+        if (window.THREE) {
+            window.initGame();
+        }
+    </script>
+</body>
+</html>

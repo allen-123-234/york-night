@@ -1,0 +1,297 @@
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: 'Microsoft JhengHei', 'PingFang TC', sans-serif;
+    overflow: hidden;
+    background: #000;
+}
+
+#game-container {
+    width: 100vw;
+    height: 100vh;
+    position: relative;
+}
+
+#loading-screen {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    z-index: 1000;
+    color: white;
+}
+
+#loading-screen h1 {
+    font-size: 3rem;
+    margin-bottom: 20px;
+    text-shadow: 2px 2px 4px rgba(0,0,0,0.5);
+}
+
+#loading-screen p {
+    font-size: 1.2rem;
+    margin-bottom: 30px;
+}
+
+.loading-bar {
+    width: 300px;
+    height: 8px;
+    background: rgba(255,255,255,0.2);
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.loading-progress {
+    width: 0%;
+    height: 100%;
+    background: linear-gradient(90deg, #e94560, #ff6b6b);
+    transition: width 0.3s ease;
+}
+
+#ui-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 100;
+}
+
+#minimap {
+    position: absolute;
+    bottom: 20px;
+    right: 20px;
+    width: 200px;
+    height: 200px;
+    background: rgba(0,0,0,0.7);
+    border: 2px solid rgba(255,255,255,0.3);
+    border-radius: 10px;
+    overflow: hidden;
+}
+
+#map-credit {
+    position: absolute;
+    right: 22px;
+    bottom: 224px;
+    color: rgba(255, 255, 255, 0.78);
+    font-size: 11px;
+    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+}
+
+#player-info {
+    position: absolute;
+    bottom: 20px;
+    left: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.health-bar {
+    width: 200px;
+    height: 20px;
+    background: rgba(0,0,0,0.7);
+    border: 2px solid rgba(255,255,255,0.3);
+    border-radius: 10px;
+    overflow: hidden;
+}
+
+.health-fill {
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(90deg, #4caf50, #8bc34a);
+    transition: width 0.3s ease;
+}
+
+.player-name {
+    color: white;
+    font-size: 1.2rem;
+    text-shadow: 1px 1px 2px rgba(0,0,0,0.8);
+}
+
+#controls-hint {
+    position: absolute;
+    top: 20px;
+    left: 20px;
+    color: white;
+    font-size: 0.9rem;
+    background: rgba(0,0,0,0.5);
+    padding: 15px;
+    border-radius: 8px;
+    opacity: 0.7;
+}
+
+.control-item {
+    margin: 5px 0;
+    text-shadow: 1px 1px 2px rgba(0,0,0,0.8);
+}
+
+.hidden {
+    display: none !important;
+}
+
+#game-menu {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background: rgba(0,0,0,0.9);
+    padding: 40px;
+    border-radius: 15px;
+    text-align: center;
+    pointer-events: auto;
+    z-index: 1000;
+    min-width: 300px;
+}
+
+#game-menu h2 {
+    color: white;
+    margin-bottom: 30px;
+    font-size: 2rem;
+}
+
+#game-menu button {
+    display: block;
+    width: 100%;
+    padding: 15px;
+    margin: 10px 0;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    border: none;
+    border-radius: 8px;
+    font-size: 1.1rem;
+    cursor: pointer;
+    transition: transform 0.2s, box-shadow 0.2s;
+}
+
+#game-menu button:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+}
+
+#game-menu button:active {
+    transform: translateY(0);
+}
+
+/* 手機觸控控制器 */
+#mobile-controls {
+    position: absolute;
+    bottom: 20px;
+    left: 0;
+    width: 100%;
+    height: 200px;
+    pointer-events: none;
+    z-index: 300;
+}
+
+#joystick-container {
+    position: absolute;
+    bottom: 20px;
+    left: 20px;
+    width: 120px;
+    height: 120px;
+    pointer-events: auto;
+}
+
+#joystick-base {
+    width: 100%;
+    height: 100%;
+    background: rgba(255, 255, 255, 0.2);
+    border: 2px solid rgba(255, 255, 255, 0.4);
+    border-radius: 50%;
+    position: relative;
+}
+
+#joystick-stick {
+    width: 50px;
+    height: 50px;
+    background: rgba(255, 255, 255, 0.6);
+    border: 2px solid rgba(255, 255, 255, 0.8);
+    border-radius: 50%;
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    transition: transform 0.1s ease;
+}
+
+#action-buttons {
+    position: absolute;
+    bottom: 20px;
+    right: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    pointer-events: auto;
+}
+
+.action-btn {
+    width: 60px;
+    height: 60px;
+    border-radius: 50%;
+    border: 2px solid rgba(255, 255, 255, 0.6);
+    background: rgba(255, 255, 255, 0.3);
+    color: white;
+    font-size: 12px;
+    font-weight: bold;
+    cursor: pointer;
+    backdrop-filter: blur(5px);
+    -webkit-backdrop-filter: blur(5px);
+    transition: background 0.2s;
+}
+
+.action-btn:active {
+    background: rgba(255, 255, 255, 0.5);
+}
+
+#jump-btn {
+    background: rgba(255, 107, 107, 0.4);
+}
+
+#sprint-btn {
+    background: rgba(255, 230, 109, 0.4);
+}
+
+/* 視角控制區域 */
+#look-area {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: auto;
+    z-index: 250;
+}
+
+/* 觸控裝置（由 JS 加上 is-mobile，平板也適用） */
+body { touch-action: none; user-select: none; -webkit-user-select: none; }
+.is-mobile #controls-hint { display: none; }
+
+#toast {
+    position: absolute;
+    top: 12%;
+    left: 50%;
+    transform: translateX(-50%);
+    max-width: 80%;
+    background: rgba(0,0,0,0.85);
+    color: #fff;
+    padding: 12px 22px;
+    border-radius: 8px;
+    font-size: 1rem;
+    line-height: 1.5;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.3s;
+    z-index: 400;
+}
+#toast.show { opacity: 1; }
