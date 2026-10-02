@@ -7,6 +7,9 @@ class Game {
         this.player = null;
         this.buildings = [];
         this.solids = [];
+        this.surfaces = [];       // 可走上去的表面（坡道、台階、平台）
+        this.blockers = [];       // 擋人的欄杆、矮牆、機台（低於頂端高度就撞牆）
+        this.maxStep = 0.35;      // 一步最多能跨上多高；超過就像撞牆（要用跳的）
         this.planSurfaces = [];
         this.planPaths = [];
         this.controls = {};
@@ -19,6 +22,27 @@ class Game {
         this.playerScale = 0.72;  // 玩家大小（原本偏大，約 2.7 m；0.72 約 1.9 m）
         this.playerGround = 1 * this.playerScale;   // 玩家中心離地高度（腳剛好貼地）
         this.columns = [];        // 圓柱碰撞（挑空走道裡的柱子）
+        this.vehicles = [];
+        this.currentVehicle = null;
+        this.currentSpeed = 0;
+        this.pedestrians = [];
+        this.wantedLevel = 0;
+        this.wantedRadius = 0;
+        this.wantedCenter = null;
+        this.wantedEscapeTime = 0;
+        this.wantedRing = null;
+        this.instructors = [];
+        this.maxWantedLevel = 3;
+        this.maxWantedRadius = 32;
+        this.coverZones = [];
+        this.minorViolationZones = [];
+        this.propertyDamageZones = [];
+        this.lastVehicleViolationZone = null;
+        this.wantedLastSeen = null;
+        this.whistlePlayed = false;
+        this.wantedRoadblocks = [];
+        this.wantedRoadblockColliders = [];
+        this.isExploringOutsideCampus = false;
         this.touchControls = {
             joystickActive: false,
             joystickX: 0,
@@ -31,7 +55,9 @@ class Game {
         // 小地圖相關
         this.minimapCanvas = null;
         this.minimapCtx = null;
-        this.minimapScale = 0.5; // 縮放比例
+        this.minimapExpanded = false;
+        this.minimapRange = 48;
+        this.minimapExpandedRange = 105;
         
         this.init();
     }
@@ -44,6 +70,7 @@ class Game {
         this.setupPlayer();
         this.setupBuildings();
         this.setupControls();
+        this.createPedestrians();
         this.setupEventListeners();
         this.animate();
         
@@ -58,30 +85,62 @@ class Game {
         const minimapDiv = document.getElementById('minimap');
         if (!minimapDiv) return;
         
-        // 創建畫布
-        this.minimapCanvas = document.createElement('canvas');
-        this.minimapCanvas.width = 200;
-        this.minimapCanvas.height = 200;
+        this.minimapCanvas = document.getElementById('minimap-canvas');
+        if (!this.minimapCanvas) {
+            this.minimapCanvas = document.createElement('canvas');
+            this.minimapCanvas.id = 'minimap-canvas';
+        }
+        this.minimapCanvas.width = 320;
+        this.minimapCanvas.height = 320;
         this.minimapCanvas.style.width = '100%';
         this.minimapCanvas.style.height = '100%';
         minimapDiv.appendChild(this.minimapCanvas);
-        
+
         this.minimapCtx = this.minimapCanvas.getContext('2d');
+        const toggle = document.getElementById('map-toggle');
+        if (toggle) {
+            toggle.addEventListener('click', () => this.toggleMinimap());
+        }
+        minimapDiv.addEventListener('click', (event) => {
+            if (event.target === this.minimapCanvas) this.toggleMinimap();
+        });
+        this.updateMinimapMode();
+    }
+
+    toggleMinimap() {
+        this.minimapExpanded = !this.minimapExpanded;
+        this.updateMinimapMode();
+    }
+
+    updateMinimapMode() {
+        const minimap = document.getElementById('minimap');
+        const toggle = document.getElementById('map-toggle');
+        if (!minimap) return;
+        minimap.classList.toggle('expanded', this.minimapExpanded);
+        if (toggle) {
+            toggle.textContent = this.minimapExpanded ? '縮小' : '放大';
+            toggle.setAttribute('aria-label', this.minimapExpanded ? '縮小地圖' : '放大地圖');
+        }
     }
     
     updateMinimap() {
         if (!this.minimapCtx || !this.player) return;
         const ctx = this.minimapCtx, W = this.minimapCanvas.width, H = this.minimapCanvas.height;
+        const center = this.player.position;
+        const range = this.minimapExpanded ? this.minimapExpandedRange : this.minimapRange;
+        const scale = Math.min(W, H) / (range * 2);
+        const angle = this.controls.cameraAngle;
+        const sin = Math.sin(angle), cos = Math.cos(angle);
+        const toCanvas = point => {
+            const dx = (center.x - point.x) * scale;
+            const dz = (center.z - point.z) * scale;
+            return {
+                x: W / 2 + dx * cos - dz * sin,
+                y: H / 2 + dx * sin + dz * cos
+            };
+        };
         const points = this.campusBoundary || [];
         if (!points.length) return;
-        const minX = Math.min(...points.map(point => point.x));
-        const maxX = Math.max(...points.map(point => point.x));
-        const minZ = Math.min(...points.map(point => point.z));
-        const maxZ = Math.max(...points.map(point => point.z));
-        const scale = Math.min((W - 24) / (maxX - minX), (H - 24) / (maxZ - minZ));
-        const centerX = (minX + maxX) / 2;
-        const centerZ = (minZ + maxZ) / 2;
-        const toCanvas = point => ({ x: W / 2 - (point.x - centerX) * scale, y: H / 2 - (point.z - centerZ) * scale });
         const drawPolygon = (polygon, color, stroke) => {
             if (!polygon || polygon.length < 3) return;
             ctx.beginPath();
@@ -100,6 +159,11 @@ class Game {
             }
         };
 
+        ctx.clearRect(0, 0, W, H);
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(W / 2, H / 2, W / 2 - 2, 0, Math.PI * 2);
+        ctx.clip();
         ctx.fillStyle = '#d6d2c7';
         ctx.fillRect(0, 0, W, H);
         drawPolygon(points, '#72836c', '#263127');
@@ -117,6 +181,16 @@ class Game {
             ctx.lineJoin = 'round';
             ctx.stroke();
         }
+        if (this.wantedLevel && this.wantedCenter) {
+            const alertCenter = toCanvas(this.wantedCenter);
+            ctx.beginPath();
+            ctx.arc(alertCenter.x, alertCenter.y, this.wantedRadius * scale, 0, Math.PI * 2);
+            ctx.strokeStyle = 'rgba(255, 45, 54, 0.9)';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([5, 4]);
+            ctx.stroke();
+            ctx.setLineDash([]);
+        }
 
         const labels = [];
         for (const building of this.buildings) {
@@ -129,28 +203,65 @@ class Game {
             labels.push({ name: building.name, ...toCanvas(center) });
         }
 
-        ctx.font = 'bold 8px Microsoft JhengHei, sans-serif';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.lineWidth = 2.5;
-        ctx.strokeStyle = 'rgba(24, 28, 24, 0.95)';
-        ctx.fillStyle = '#fffdf4';
-        for (const label of labels) {
-            ctx.strokeText(label.name, label.x, label.y);
-            ctx.fillText(label.name, label.x, label.y);
+        if (this.minimapExpanded) {
+            ctx.font = 'bold 12px Microsoft JhengHei, sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.lineWidth = 3;
+            ctx.strokeStyle = 'rgba(24, 28, 24, 0.95)';
+            ctx.fillStyle = '#fffdf4';
+            for (const label of labels) {
+                ctx.strokeText(label.name, label.x, label.y);
+                ctx.fillText(label.name, label.x, label.y);
+            }
         }
 
         const player = toCanvas(this.player.position);
+        for (const vehicle of this.vehicles) {
+            if (vehicle === this.currentVehicle) continue;
+            const point = toCanvas(vehicle.mesh.position);
+            ctx.fillStyle = vehicle.stolen ? '#777' : vehicle.mapColor;
+            ctx.fillRect(point.x - 2, point.y - 2, 4, 4);
+        }
+        for (const instructor of this.instructors) {
+            const point = toCanvas(instructor.mesh.position);
+            ctx.fillStyle = '#ff343b';
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 2;
+            if (this.wantedLevel) {
+                const cone = instructor.sightRadius * scale;
+                const facing = instructor.mesh.rotation.y;
+                const halfAngle = instructor.sightAngle / 2;
+                ctx.beginPath();
+                ctx.moveTo(point.x, point.y);
+                for (let step = 0; step <= 12; step++) {
+                    const direction = facing - halfAngle + halfAngle * 2 * step / 12;
+                    const target = toCanvas({
+                        x: instructor.mesh.position.x + Math.sin(direction) * instructor.sightRadius,
+                        z: instructor.mesh.position.z + Math.cos(direction) * instructor.sightRadius
+                    });
+                    ctx.lineTo(target.x, target.y);
+                }
+                ctx.closePath();
+                ctx.fillStyle = 'rgba(240, 40, 48, 0.16)';
+                ctx.fill();
+            }
+            ctx.fillStyle = '#ff343b';
+            ctx.beginPath();
+            ctx.arc(point.x, point.y, this.minimapExpanded ? 9 : 8, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.stroke();
+        }
         ctx.save();
         ctx.translate(player.x, player.y);
-        ctx.rotate(this.controls.cameraAngle);
         ctx.fillStyle = '#e3483d';
         ctx.beginPath();
-        ctx.moveTo(0, -6);
-        ctx.lineTo(-4, 4);
-        ctx.lineTo(4, 4);
+        ctx.moveTo(0, -14);
+        ctx.lineTo(-9, 10);
+        ctx.lineTo(9, 10);
         ctx.closePath();
         ctx.fill();
+        ctx.restore();
         ctx.restore();
     }
     
@@ -241,18 +352,20 @@ class Game {
     
     setupPlayer() {
         // 創建玩家角色（使用CylinderGeometry代替CapsuleGeometry）
-        const playerGeometry = new THREE.CylinderGeometry(0.5, 0.5, 2, 8);
+        const playerGeometry = new THREE.CylinderGeometry(0.43, 0.46, 1.25, 10);
         const playerMaterial = new THREE.MeshStandardMaterial({ 
             color: 0x141414,
             roughness: 0.7,
             metalness: 0.0
         });
         this.player = new THREE.Mesh(playerGeometry, playerMaterial);
+        this.player.position.y = 0.15;
         const spawn = this.projectMapPoint(120.68622, 24.14943);
         this.player.scale.setScalar(this.playerScale);
         this.player.position.set(spawn.x, this.playerGround, spawn.z);
         this.player.castShadow = true;
         this.player.receiveShadow = true;
+        this.playerAnimation = { phase: 0, arms: [], legs: [], avatar: null };
         this.scene.add(this.player);
         this.buildPlayerAvatar();
         
@@ -266,9 +379,12 @@ class Game {
     // 角色外觀：臉部使用真人照片貼圖（face.png），其餘為黑髮、黑色上衣、手錶
     buildPlayerAvatar() {
         const P = this.player;
+        const avatar = new THREE.Group();
+        P.add(avatar);
+        this.playerAnimation.avatar = avatar;
         const mat = (c, r = 0.8) => new THREE.MeshStandardMaterial({ color: c, roughness: r });
         const skin = mat(0xc29b84, 0.7), hairM = mat(0x131110, 0.9);
-        const add = (mesh, x, y, z, parent = P) => { mesh.position.set(x, y, z); parent.add(mesh); return mesh; };
+        const add = (mesh, x, y, z, parent = avatar) => { mesh.position.set(x, y, z); parent.add(mesh); return mesh; };
         const SX = 0.9, SY = 1.25, SZ = 0.95, R = 0.4, HY = 1.38;
 
         add(new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.16, 0.3, 10), skin), 0, 0.98, 0);
@@ -277,7 +393,7 @@ class Game {
         const headG = new THREE.Group();
         headG.scale.set(SX, SY, SZ);
         headG.position.set(0, HY, 0);
-        P.add(headG);
+        avatar.add(headG);
         const head = new THREE.Mesh(new THREE.SphereGeometry(R, 32, 24), skin);
         head.castShadow = true;
         headG.add(head);
@@ -300,7 +416,7 @@ class Game {
         patch.renderOrder = 2;
         headG.add(patch);
         new THREE.TextureLoader().load('face.png', (tex) => {
-            tex.encoding = THREE.sRGBEncoding;
+            tex.colorSpace = THREE.SRGBColorSpace;
             tex.anisotropy = 8;
             faceMat.map = tex; faceMat.needsUpdate = true;
         }, undefined, () => console.warn('face.png 載入失敗，請確認它和 index.html 放在同一個資料夾'));
@@ -314,14 +430,24 @@ class Game {
 
         // 黑色短袖：手臂（肩下一小段袖子 + 手臂皮膚）
         for (const sx of [1, -1]) {
-            add(new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.12, 0.34, 10), mat(0x141414, 0.7)), sx * 0.62, 0.62, 0);
-            add(new THREE.Mesh(new THREE.CylinderGeometry(0.095, 0.085, 0.62, 10), skin), sx * 0.62, 0.14, 0);
-            add(new THREE.Mesh(new THREE.SphereGeometry(0.1, 10, 8), skin), sx * 0.62, -0.2, 0);
+            const arm = new THREE.Group();
+            arm.position.set(sx * 0.62, 0.62, 0);
+            avatar.add(arm);
+            this.playerAnimation.arms.push({ mesh: arm, side: sx });
+            add(new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.12, 0.34, 10), mat(0x141414, 0.7)), 0, 0, 0, arm);
+            add(new THREE.Mesh(new THREE.CylinderGeometry(0.095, 0.085, 0.62, 10), skin), 0, -0.48, 0, arm);
+            add(new THREE.Mesh(new THREE.SphereGeometry(0.1, 10, 8), skin), 0, -0.82, 0, arm);
+            const leg = new THREE.Group();
+            leg.position.set(sx * 0.2, -0.24, 0);
+            avatar.add(leg);
+            this.playerAnimation.legs.push({ mesh: leg, side: sx });
+            add(new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.12, 0.75, 10), mat(0x171717, 0.85)), 0, -0.35, 0, leg);
+            add(new THREE.Mesh(new THREE.BoxGeometry(0.29, 0.16, 0.4), mat(0x242424, 0.8)), 0, -0.74, 0.08, leg);
         }
         // 左手腕（角色的左邊 = +x）銀色手錶
         const watch = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 0.07, 14), mat(0xc9ccd1, 0.25));
         watch.material.metalness = 0.8;
-        add(watch, 0.62, -0.08, 0);
+        add(watch, 0, -0.7, 0, this.playerAnimation.arms[0].mesh);
 
         // 胸前白色「中中」圖樣（左胸 = +x；八角柱正面刻面法線偏 22.5°）
         const cv = document.createElement('canvas'); cv.width = cv.height = 128;
@@ -333,7 +459,22 @@ class Game {
         const a = Math.PI / 8, d = 0.5 * Math.cos(a) + 0.004;
         print.position.set(Math.sin(a) * d, 0.5, Math.cos(a) * d);
         print.rotation.y = a;
-        P.add(print);
+        avatar.add(print);
+    }
+
+    updatePlayerAnimation(delta, moving, running) {
+        const animation = this.playerAnimation;
+        const amplitude = moving ? (running ? 0.72 : 0.45) : 0;
+        if (moving) animation.phase += delta * (running ? 13 : 8);
+        const cycle = Math.sin(animation.phase);
+        for (const arm of animation.arms) {
+            arm.mesh.rotation.x += (-arm.side * cycle * amplitude - arm.mesh.rotation.x) * Math.min(1, 12 * delta);
+        }
+        for (const leg of animation.legs) {
+            leg.mesh.rotation.x += (leg.side * cycle * amplitude - leg.mesh.rotation.x) * Math.min(1, 12 * delta);
+        }
+        const bob = moving ? Math.abs(Math.sin(animation.phase * 2)) * (running ? 0.035 : 0.02) : 0;
+        animation.avatar.position.y += (bob - animation.avatar.position.y) * Math.min(1, 14 * delta);
     }
 
     setupBuildings() {
@@ -344,6 +485,670 @@ class Game {
         this.createCampusWalls();
         this.createCampusDetails();
         this.prepareBuildings();
+        this.minorViolationZones = [
+            { name: '校門口', position: this.projectMapPoint(120.68622, 24.14943), radius: 9 },
+            { name: '穿堂', position: this.projectMapPoint(120.68645, 24.15012), radius: 7 }
+        ];
+        this.propertyDamageZones = [
+            { name: '容光華園花圃', position: this.projectMapPoint(120.6858, 24.14955), radius: 5 },
+            { name: '光中亭周圍花圃', position: this.projectMapPoint(120.68754, 24.1503), radius: 5 }
+        ];
+        this.createVehicles();
+    }
+
+    createVehicles() {
+        const materials = {
+            frame: new THREE.MeshStandardMaterial({ color: 0x263b4b, metalness: 0.55, roughness: 0.4 }),
+            tire: new THREE.MeshStandardMaterial({ color: 0x171717, roughness: 0.85 }),
+            metal: new THREE.MeshStandardMaterial({ color: 0xb8c1c8, metalness: 0.75, roughness: 0.3 }),
+            glass: new THREE.MeshStandardMaterial({ color: 0x87c9d9, metalness: 0.15, roughness: 0.2, transparent: true, opacity: 0.7 })
+        };
+        const addBar = (group, start, end, radius, material) => {
+            const a = new THREE.Vector3(...start), b = new THREE.Vector3(...end);
+            const direction = new THREE.Vector3().subVectors(b, a);
+            const bar = new THREE.Mesh(new THREE.CylinderGeometry(radius, radius, direction.length(), 8), material);
+            bar.position.copy(a).add(b).multiplyScalar(0.5);
+            bar.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), direction.normalize());
+            group.add(bar);
+        };
+        const addWheel = (group, x, z, radius, material) => {
+            const wheel = new THREE.Mesh(new THREE.TorusGeometry(radius, 0.09, 8, 20), material);
+            wheel.position.set(x, radius, z);
+            wheel.rotation.y = Math.PI / 2;
+            group.add(wheel);
+        };
+        const buildBicycle = () => {
+            const group = new THREE.Group();
+            const frame = materials.frame;
+            addWheel(group, 0, -0.78, 0.42, materials.tire);
+            addWheel(group, 0, 0.78, 0.42, materials.tire);
+            addBar(group, [0, 0.42, -0.78], [0, 0.94, -0.18], 0.045, frame);
+            addBar(group, [0, 0.42, 0.78], [0, 0.94, -0.18], 0.045, frame);
+            addBar(group, [0, 0.94, -0.18], [0, 0.5, 0.08], 0.045, frame);
+            addBar(group, [0, 0.5, 0.08], [0, 0.42, -0.78], 0.045, frame);
+            addBar(group, [0, 0.5, 0.08], [0, 0.94, 0.58], 0.04, materials.metal);
+            addBar(group, [-0.25, 0.98, -0.18], [0.25, 0.98, -0.18], 0.07, frame);
+            const wrapper = new THREE.Group();   // 車頭轉成朝 +z（與角色前進方向一致）
+            group.rotation.y = Math.PI;
+            wrapper.add(group);
+            return wrapper;
+        };
+        const buildMotorcycle = () => {
+            const group = new THREE.Group();
+            addWheel(group, 0, -0.95, 0.48, materials.tire);
+            addWheel(group, 0, 0.95, 0.48, materials.tire);
+            const body = new THREE.Mesh(new THREE.BoxGeometry(0.68, 0.48, 1.35), materials.frame);
+            body.position.set(0, 0.92, 0);
+            group.add(body);
+            const seat = new THREE.Mesh(new THREE.BoxGeometry(0.56, 0.16, 0.78), materials.tire);
+            seat.position.set(0, 1.22, -0.1);
+            group.add(seat);
+            addBar(group, [0, 0.85, 0.35], [0, 1.42, 0.75], 0.045, materials.metal);
+            addBar(group, [-0.45, 1.42, 0.75], [0.45, 1.42, 0.75], 0.045, materials.metal);
+            return group;
+        };
+        const buildCar = () => {
+            const group = new THREE.Group();
+            const bodyMaterial = new THREE.MeshStandardMaterial({ color: 0xa83434, metalness: 0.35, roughness: 0.4 });
+            const body = new THREE.Mesh(new THREE.BoxGeometry(1.9, 0.65, 3.7), bodyMaterial);
+            body.position.y = 0.68;
+            group.add(body);
+            const cabin = new THREE.Mesh(new THREE.BoxGeometry(1.55, 0.75, 1.85), materials.glass);
+            cabin.position.set(0, 1.3, -0.15);
+            group.add(cabin);
+            for (const x of [-1, 1]) {
+                for (const z of [-1.2, 1.2]) {
+                    const wheel = new THREE.Mesh(new THREE.CylinderGeometry(0.38, 0.38, 0.2, 16), materials.tire);
+                    wheel.position.set(x, 0.42, z);
+                    wheel.rotation.z = Math.PI / 2;
+                    group.add(wheel);
+                }
+            }
+            return group;
+        };
+        this.buildMotorcycleModel = buildMotorcycle;
+        // 讓肩膀處的手臂樞軸指向把手（必要時拉長手臂），避免手垂在身體兩側
+        const aimArm = (pivot, targetWorld, naturalLength) => {
+            pivot.parent.updateWorldMatrix(true, false);
+            const dir = pivot.parent.worldToLocal(targetWorld.clone()).sub(pivot.position);
+            const length = dir.length();
+            pivot.quaternion.setFromUnitVectors(new THREE.Vector3(0, -1, 0), dir.normalize());
+            pivot.scale.set(1, Math.min(2, Math.max(0.6, length / naturalLength)), 1);
+        };
+        this.aimArm = aimArm;
+        const pantsMaterial = new THREE.MeshStandardMaterial({ color: 0x24282d, roughness: 0.85 });
+        // 坐姿：身體前傾、手握把手、腿折起來踩踏板
+        const createSeatedRider = (mesh, pose) => {
+            const rider = new THREE.Group();
+            const lean = new THREE.Group();
+            lean.position.set(0, pose.hipY, pose.hipZ);
+            lean.scale.setScalar(pose.scale);
+            lean.rotation.x = pose.lean;
+            rider.add(lean);
+            const body = this.player.clone(true);
+            body.position.set(0, 0.9, 0);      // 圓柱身體底端剛好在髖部
+            body.rotation.set(0, 0, 0);
+            body.scale.setScalar(1);
+            lean.add(body);
+            const head = body.children.find(child => child.isGroup);
+            if (head) head.rotation.x = -pose.lean * 0.75;   // 抬頭看前方
+            const arms = [];
+            for (const side of [1, -1]) {
+                const pivot = new THREE.Group();
+                pivot.position.set(side * 0.62, 0.75, 0);
+                body.add(pivot);
+                for (const part of body.children.slice()) {
+                    if (part !== pivot && Math.abs(part.position.x - side * 0.62) < 0.01 && part.position.y < 0.8) {
+                        part.position.y -= 0.75;
+                        part.position.x = 0;
+                        pivot.add(part);
+                    }
+                }
+                arms.push({ pivot, side });
+            }
+            for (const side of [1, -1]) {
+                const hip = new THREE.Vector3(side * 0.2, pose.hipY, pose.hipZ);
+                const knee = new THREE.Vector3(side * pose.legSpread, pose.kneeY, pose.kneeZ);
+                const foot = new THREE.Vector3(side * pose.legSpread, pose.footY, pose.footZ);
+                for (const [a, b] of [[hip, knee], [knee, foot]]) {
+                    const direction = new THREE.Vector3().subVectors(b, a);
+                    const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.1, direction.length(), 8), pantsMaterial);
+                    leg.position.copy(a).add(b).multiplyScalar(0.5);
+                    leg.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), direction.normalize());
+                    rider.add(leg);
+                }
+                const shoe = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.1, 0.32), materials.tire);
+                shoe.position.set(side * pose.legSpread, pose.footY, pose.footZ + 0.08);
+                rider.add(shoe);
+            }
+            mesh.add(rider);
+            mesh.updateMatrixWorld(true);
+            for (const { pivot, side } of arms) {
+                aimArm(pivot, mesh.localToWorld(new THREE.Vector3(side * pose.handX, pose.handY, pose.handZ)), 0.95);
+            }
+            return rider;
+        };
+        this.seatedPoses = {
+            motorcycle: { hipY: 1.3, hipZ: -0.05, scale: 0.46, lean: 0.5, handX: 0.42, handY: 1.42, handZ: 0.75,
+                          legSpread: 0.38, kneeY: 1.2, kneeZ: 0.5, footY: 0.55, footZ: 0.1 },
+            bicycle: { hipY: 1.02, hipZ: -0.55, scale: 0.42, lean: 0.6, handX: 0.25, handY: 0.98, handZ: 0.18,
+                       legSpread: 0.2, kneeY: 0.95, kneeZ: -0.05, footY: 0.3, footZ: -0.1 }
+        };
+        this.createSeatedRider = createSeatedRider;
+        const definitions = [
+            { type: 'bicycle', name: '同學腳踏車', severity: 2, speed: 7.2, acceleration: 3.8, braking: 6, accelerationMultiplier: 1.22, radius: 0.8, mapColor: '#68d2b0', build: buildBicycle, position: this.projectMapPoint(120.68628, 24.14947) },
+            { type: 'motorcycle', name: '一般機車', severity: 2, speed: 9, acceleration: 5.2, braking: 7, accelerationMultiplier: 1.18, radius: 1.1, mapColor: '#ffc857', build: buildMotorcycle, position: this.projectMapPoint(120.68662, 24.15030) },
+            { type: 'car', name: '汽車', severity: 2, speed: 11.5, acceleration: 4.2, braking: 6, accelerationMultiplier: 1.12, radius: 1.7, mapColor: '#ed6a5a', build: buildCar, position: this.projectMapPoint(120.68732, 24.15093) },
+            { type: 'instructorMotorcycle', name: '教官公務機車', severity: 3, speed: 10.5, acceleration: 5.2, braking: 7, accelerationMultiplier: 1.18, radius: 1.1, mapColor: '#f0e5d1', build: buildMotorcycle, position: this.projectMapPoint(120.68739, 24.14986) }
+        ];
+        for (const definition of definitions) {
+            const mesh = definition.build();
+            mesh.position.set(definition.position.x, 0, definition.position.z);
+            mesh.rotation.y = Math.PI;
+            this.scene.add(mesh);
+            let rider;
+            if (this.seatedPoses[definition.type]) {
+                rider = createSeatedRider(mesh, this.seatedPoses[definition.type]);
+            } else {
+                rider = this.player.clone(true);
+                rider.position.set(0, 0.66, 0);
+                rider.scale.setScalar(this.playerScale * 0.82);
+                mesh.add(rider);
+            }
+            rider.visible = false;
+            mesh.traverse(part => { if (part.isMesh) part.castShadow = true; });
+            this.vehicles.push({ ...definition, mesh, rider, stolen: false });
+        }
+    }
+
+    reportVehicleTheft(vehicle) {
+        if (!vehicle.stolen) {
+            vehicle.stolen = true;
+            const event = vehicle.type === 'instructorMotorcycle'
+                ? '搶走教官公務機車（最高警戒）'
+                : `搶走${vehicle.name}`;
+            this.reportViolation(vehicle.severity, event);
+        }
+    }
+
+    reportViolation(level, reason) {
+        const nextLevel = Math.min(this.maxWantedLevel, Math.max(this.wantedLevel, level));
+        if (nextLevel === this.wantedLevel) return;
+        this.wantedLevel = nextLevel;
+        this.wantedEscapeTime = 0;
+        this.wantedElapsed = 0;
+        this.wantedLastSeen = { x: this.player.position.x, z: this.player.position.z };
+        this.wantedCenter = { ...this.wantedLastSeen };
+        this.wantedRadius = [0, 8, 15, this.maxWantedRadius][this.wantedLevel];
+        this.whistlePlayed = this.wantedLevel === 1;
+        this.clearInstructorUnits();
+        this.createInstructors();
+        this.createWantedRing();
+        if (this.wantedLevel === 3) this.createWantedRoadblocks();
+        this.showToast(this.wantedLevel === 1
+            ? `嗶——教官吹哨警告：${reason}（1 星）`
+            : `${reason}，教官已收到通報（${'★'.repeat(this.wantedLevel)}）`);
+        this.updateWantedStatus();
+    }
+
+    checkMinorVehicleViolation() {
+        if (!this.currentVehicle) return;
+        const position = this.player.position;
+        const damagedGarden = this.propertyDamageZones.find(area =>
+            Math.hypot(position.x - area.position.x, position.z - area.position.z) <= 1.6 + this.currentVehicle.radius * 0.5
+        );
+        if (damagedGarden && this.currentVehicle.type !== 'instructorMotorcycle' &&
+            this.wantedLevel < 3) {
+            this.reportViolation(3, `撞翻${damagedGarden.name}`);
+            return;
+        }
+        if (this.wantedLevel) return;
+        const zone = this.minorViolationZones.find(area =>
+            Math.hypot(position.x - area.position.x, position.z - area.position.z) <= area.radius
+        );
+        const zoneName = zone ? zone.name : null;
+        if (zoneName && zoneName !== this.lastVehicleViolationZone) {
+            this.lastVehicleViolationZone = zoneName;
+            this.reportViolation(1, `在${zoneName}違規騎車`);
+        } else if (!zoneName) {
+            this.lastVehicleViolationZone = null;
+        }
+    }
+
+    createInstructors() {
+        const shirt = new THREE.MeshStandardMaterial({ color: 0x283e58, roughness: 0.75 });
+        const trousers = new THREE.MeshStandardMaterial({ color: 0x24282d, roughness: 0.85 });
+        const skin = new THREE.MeshStandardMaterial({ color: 0xc99d7b, roughness: 0.8 });
+        const helmet = new THREE.MeshStandardMaterial({ color: 0xf2f2f2, roughness: 0.4 });
+        const config = this.wantedLevel === 1
+            ? { count: 1, sightRadius: 8, sightAngle: Math.PI / 3, footSpeed: 4.4, bikeSpeed: 0 }
+            : this.wantedLevel === 2
+                ? { count: 3, sightRadius: 15, sightAngle: Math.PI * 0.62, footSpeed: 6.2, bikeSpeed: 8 }
+                : { count: 5, sightRadius: this.maxWantedRadius, sightAngle: Math.PI * 0.9, footSpeed: 7.2, bikeSpeed: 8.2 };
+        for (let index = 0; index < config.count; index++) {
+            const useMotorcycle = this.wantedLevel === 2
+                ? index === 0
+                : this.wantedLevel === 3 && index < 4;
+            const unit = new THREE.Group();
+            const patrolLights = [];
+            if (useMotorcycle) {
+                unit.add(this.buildMotorcycleModel());
+                for (const [side, color] of [[-1, 0xff3030], [1, 0x3986ff]]) {
+                    const light = new THREE.Mesh(
+                        new THREE.SphereGeometry(0.12, 10, 8),
+                        new THREE.MeshBasicMaterial({ color })
+                    );
+                    light.position.set(side * 0.2, 1.48, 0.8);
+                    unit.add(light);
+                    patrolLights.push(light);
+                }
+            }
+            const rider = new THREE.Group();
+            if (useMotorcycle) {
+                rider.scale.setScalar(0.6);
+                rider.position.set(0, 0.84, -0.05);
+                rider.rotation.x = 0.2;
+                unit.add(rider);
+            } else {
+                unit.add(rider);
+            }
+            const torso = new THREE.Mesh(new THREE.BoxGeometry(0.72, 0.95, 0.4), shirt);
+            torso.position.y = 1.18;
+            rider.add(torso);
+            const head = new THREE.Mesh(new THREE.SphereGeometry(0.23, 16, 12), skin);
+            head.position.y = 1.88;
+            rider.add(head);
+            const cap = new THREE.Mesh(new THREE.SphereGeometry(0.26, 16, 10, 0, Math.PI * 2, 0, Math.PI / 2), helmet);
+            cap.position.y = 1.9;
+            rider.add(cap);
+            const tie = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.42, 0.06), new THREE.MeshStandardMaterial({ color: 0xc64242 }));
+            tie.position.set(0, 1.38, 0.22);
+            rider.add(tie);
+            const arms = [];
+            const legs = [];
+            for (const side of [-1, 1]) {
+                const pivot = new THREE.Group();
+                pivot.position.set(side * 0.48, useMotorcycle ? 1.55 : 1.55, 0);
+                const arm = new THREE.Mesh(new THREE.BoxGeometry(0.19, 0.78, 0.22), shirt);
+                arm.position.y = -0.39;
+                pivot.add(arm);
+                rider.add(pivot);
+                arms.push({ pivot, side });
+                const legPivot = new THREE.Group();
+                legPivot.position.set(side * 0.2, 0.78, 0);
+                const leg = new THREE.Mesh(new THREE.BoxGeometry(0.25, 0.78, 0.28), trousers);
+                leg.position.y = -0.39;
+                legPivot.add(leg);
+                rider.add(legPivot);
+                legs.push({ pivot: legPivot, side });
+            }
+            const angle = Math.PI * 2 * index / config.count + 0.35;
+            const distance = this.wantedLevel === 1 ? 10 : 13 + (index % 2) * 5;
+            unit.position.set(this.wantedCenter.x + Math.sin(angle) * distance, 0, this.wantedCenter.z + Math.cos(angle) * distance);
+            this.resolveCollisions(unit.position, false);
+            unit.rotation.y = Math.atan2(this.wantedCenter.x - unit.position.x, this.wantedCenter.z - unit.position.z);
+            this.scene.add(unit);
+            unit.updateMatrixWorld(true);
+            if (useMotorcycle) {
+                for (const { pivot, side } of arms) {
+                    this.aimArm(pivot, unit.localToWorld(new THREE.Vector3(side * 0.42, 1.42, 0.75)), 0.78);
+                }
+            }
+            const coneShape = new THREE.Shape();
+            coneShape.moveTo(0, 0);
+            const halfAngle = config.sightAngle / 2;
+            const segments = 28;
+            for (let step = 0; step <= segments; step++) {
+                const angleOnCone = -halfAngle + config.sightAngle * step / segments;
+                coneShape.lineTo(
+                    Math.sin(angleOnCone) * config.sightRadius,
+                    -Math.cos(angleOnCone) * config.sightRadius
+                );
+            }
+            coneShape.closePath();
+            const cone = new THREE.Mesh(
+                new THREE.ShapeGeometry(coneShape),
+                new THREE.MeshBasicMaterial({ color: 0xf02c38, transparent: true, opacity: this.wantedLevel === 3 ? 0.16 : 0.22, side: THREE.DoubleSide, depthWrite: false })
+            );
+            cone.rotation.x = -Math.PI / 2;
+            cone.position.y = 0.035;
+            cone.renderOrder = 2;
+            unit.add(cone);
+            unit.traverse(part => { if (part.isMesh) part.castShadow = true; });
+            this.instructors.push({
+                mesh: unit,
+                speed: 0,
+                sightRadius: config.sightRadius,
+                sightAngle: config.sightAngle,
+                footSpeed: config.footSpeed,
+                bikeSpeed: config.bikeSpeed,
+                useMotorcycle,
+                patrolLights,
+                legs,
+                patrolPhase: angle,
+                pursuitRamp: 0
+            });
+        }
+    }
+
+    clearInstructorUnits() {
+        for (const instructor of this.instructors) this.scene.remove(instructor.mesh);
+        this.instructors = [];
+        for (const blocker of this.wantedRoadblocks) this.scene.remove(blocker);
+        this.wantedRoadblocks = [];
+        this.wantedRoadblockColliders = [];
+    }
+
+    createWantedRoadblocks() {
+        const locations = [
+            this.projectMapPoint(120.687421, 24.14986),
+            this.projectMapPoint(120.68642, 24.15015),
+            this.projectMapPoint(120.68754, 24.1503)
+        ];
+        const barrierMaterial = new THREE.MeshStandardMaterial({ color: 0xd83b36, roughness: 0.6 });
+        const stripeMaterial = new THREE.MeshStandardMaterial({ color: 0xf4eee3, roughness: 0.7 });
+        for (const [index, position] of locations.entries()) {
+            const barrier = new THREE.Group();
+            const beam = new THREE.Mesh(new THREE.BoxGeometry(5.2, 0.28, 0.35), barrierMaterial);
+            beam.position.y = 0.9;
+            barrier.add(beam);
+            const stripe = new THREE.Mesh(new THREE.BoxGeometry(4.8, 0.1, 0.37), stripeMaterial);
+            stripe.position.set(0, 0.9, 0.02);
+            stripe.rotation.z = -0.12;
+            barrier.add(stripe);
+            for (const side of [-1, 1]) {
+                const foot = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.72, 0.28), barrierMaterial);
+                foot.position.set(side * 2.1, 0.36, 0);
+                barrier.add(foot);
+                const lamp = new THREE.Mesh(
+                    new THREE.SphereGeometry(0.18, 12, 8),
+                    new THREE.MeshBasicMaterial({ color: index % 2 ? 0x3986ff : 0xff3333 })
+                );
+                lamp.position.set(side * 2.2, 1.24, 0);
+                barrier.add(lamp);
+            }
+            barrier.position.set(position.x, 0, position.z);
+            barrier.rotation.y = index === 1 ? Math.PI / 2 : 0;
+            barrier.traverse(part => { if (part.isMesh) part.castShadow = true; });
+            this.scene.add(barrier);
+            this.wantedRoadblocks.push(barrier);
+            this.wantedRoadblockColliders.push({
+                x: position.x,
+                z: position.z,
+                rotation: barrier.rotation.y,
+                halfLength: 2.6,
+                halfWidth: 0.22
+            });
+        }
+    }
+
+    createWantedRing() {
+        if (this.wantedRing) this.scene.remove(this.wantedRing);
+        const ring = new THREE.Group();
+        const fill = new THREE.Mesh(
+            new THREE.CircleGeometry(this.wantedRadius, 96),
+            new THREE.MeshBasicMaterial({ color: 0xf02c38, transparent: true, opacity: 0.045, depthWrite: false })
+        );
+        fill.rotation.x = -Math.PI / 2;
+        fill.position.y = 0.025;
+        ring.add(fill);
+        const edge = new THREE.Mesh(
+            new THREE.RingGeometry(Math.max(0, this.wantedRadius - 0.18), this.wantedRadius, 96),
+            new THREE.MeshBasicMaterial({ color: 0xf02c38, transparent: true, opacity: 0.78, side: THREE.DoubleSide, depthWrite: false })
+        );
+        edge.rotation.x = -Math.PI / 2;
+        edge.position.y = 0.04;
+        ring.add(edge);
+        ring.position.set(this.wantedCenter.x, 0, this.wantedCenter.z);
+        ring.renderOrder = 3;
+        this.scene.add(ring);
+        this.wantedRing = ring;
+    }
+
+    isPlayerConcealed() {
+        if (this.currentVehicle) return false;
+        const player = this.player.position;
+        return this.coverZones.some(zone => Math.hypot(player.x - zone.x, player.z - zone.z) < zone.radius);
+    }
+
+    isSightBlocked(start, end) {
+        const dx = end.x - start.x, dz = end.z - start.z;
+        const length = Math.hypot(dx, dz);
+        const steps = Math.ceil(length / 1.5);
+        for (let step = 1; step < steps; step++) {
+            const ratio = step / steps;
+            const x = start.x + dx * ratio, z = start.z + dz * ratio;
+            if (this.solids.some(building => building.footprint && this.isPointInPolygon(x, z, building.footprint))) return true;
+        }
+        return false;
+    }
+
+    isInstructorSeeingPlayer(instructor) {
+        const player = this.player.position, origin = instructor.mesh.position;
+        const dx = player.x - origin.x, dz = player.z - origin.z;
+        const distance = Math.hypot(dx, dz);
+        if (distance > instructor.sightRadius || this.isPlayerConcealed()) return false;
+        const facing = { x: Math.sin(instructor.mesh.rotation.y), z: Math.cos(instructor.mesh.rotation.y) };
+        const dot = (facing.x * dx + facing.z * dz) / (distance || 1);
+        if (dot < Math.cos(instructor.sightAngle / 2)) return false;
+        return !this.isSightBlocked(origin, player);
+    }
+
+    createPedestrians() {
+        const colors = [0x547c99, 0x8a5c73, 0x75804e, 0x9a7048];
+        for (const path of this.planPaths) {
+            const route = path.points.filter(point =>
+                this.isPointInPolygon(point.x, point.z, this.campusBoundary) &&
+                !this.solids.some(building => building.footprint && this.isPointInPolygon(point.x, point.z, building.footprint))
+            );
+            if (route.length < 3) continue;
+            for (const routeIndex of [1, route.length - 2]) {
+                const mesh = new THREE.Group();
+                const shirt = new THREE.MeshStandardMaterial({ color: colors[this.pedestrians.length % colors.length], roughness: 0.8 });
+                const pants = new THREE.MeshStandardMaterial({ color: 0x34383d, roughness: 0.9 });
+                const skin = new THREE.MeshStandardMaterial({ color: 0xc99d7b, roughness: 0.8 });
+                const torso = new THREE.Mesh(new THREE.BoxGeometry(0.52, 0.72, 0.3), shirt);
+                torso.position.y = 1.05;
+                mesh.add(torso);
+                const head = new THREE.Mesh(new THREE.SphereGeometry(0.17, 12, 10), skin);
+                head.position.y = 1.55;
+                mesh.add(head);
+                for (const side of [-1, 1]) {
+                    const leg = new THREE.Mesh(new THREE.BoxGeometry(0.17, 0.62, 0.2), pants);
+                    leg.position.set(side * 0.14, 0.36, 0);
+                    mesh.add(leg);
+                }
+                const start = route[routeIndex];
+                mesh.position.set(start.x, 0, start.z);
+                this.scene.add(mesh);
+                this.pedestrians.push({ mesh, route, routeIndex, direction: routeIndex === 1 ? 1 : -1, speed: 1.05, knockedDown: false });
+            }
+        }
+    }
+
+    updatePedestrians(delta) {
+        for (const pedestrian of this.pedestrians) {
+            if (pedestrian.knockedDown) continue;
+            const target = pedestrian.route[pedestrian.routeIndex];
+            const dx = target.x - pedestrian.mesh.position.x, dz = target.z - pedestrian.mesh.position.z;
+            const distance = Math.hypot(dx, dz);
+            if (distance > 0.15) {
+                const step = Math.min(distance, pedestrian.speed * delta);
+                pedestrian.mesh.position.x += dx / distance * step;
+                pedestrian.mesh.position.z += dz / distance * step;
+                pedestrian.mesh.rotation.y = Math.atan2(dx, dz);
+            } else {
+                pedestrian.routeIndex += pedestrian.direction;
+                if (pedestrian.routeIndex <= 0 || pedestrian.routeIndex >= pedestrian.route.length - 1) {
+                    pedestrian.direction *= -1;
+                    pedestrian.routeIndex = Math.max(1, Math.min(pedestrian.route.length - 2, pedestrian.routeIndex));
+                }
+            }
+            if (!this.currentVehicle) continue;
+            const gap = Math.hypot(
+                this.player.position.x - pedestrian.mesh.position.x,
+                this.player.position.z - pedestrian.mesh.position.z
+            );
+            if (gap < this.currentVehicle.radius + 0.65) {
+                pedestrian.knockedDown = true;
+                pedestrian.mesh.rotation.x = Math.PI / 2;
+                pedestrian.mesh.position.y = 0.05;
+                this.reportViolation(2, '撞倒路人');
+            }
+        }
+    }
+
+    updateWantedStatus() {
+        const status = document.getElementById('wanted-status');
+        if (!status) return;
+        if (!this.wantedLevel) {
+            status.classList.add('hidden');
+            return;
+        }
+        status.classList.remove('hidden');
+        const escapedSeconds = Math.min(5, Math.floor(this.wantedEscapeTime));
+        const approachText = this.wantedElapsed < 3
+            ? `教官逼近倒數 ${Math.ceil(3 - this.wantedElapsed)} 秒`
+            : '教官正在逼近';
+        const labels = ['', '小跑教官 x1', '包抄教官 x3', '機車巡邏隊 x5／路口封鎖'];
+        status.textContent = `教官通報 ${'★'.repeat(this.wantedLevel)}　${labels[this.wantedLevel]}　${approachText}　圈外 ${escapedSeconds}/5 秒`;
+    }
+
+    clearWanted() {
+        this.wantedLevel = 0;
+        this.wantedRadius = 0;
+        this.wantedCenter = null;
+        this.wantedEscapeTime = 0;
+        this.wantedElapsed = 0;
+        this.isExploringOutsideCampus = this.campusBoundary &&
+            !this.isPointInPolygon(this.player.position.x, this.player.position.z, this.campusBoundary);
+        if (this.wantedRing) {
+            this.scene.remove(this.wantedRing);
+            this.wantedRing = null;
+        }
+        this.clearInstructorUnits();
+        this.wantedLastSeen = null;
+        this.updateWantedStatus();
+        this.showToast('已脫離教官追捕！');
+    }
+
+    updateWanted(delta) {
+        if (!this.wantedLevel) return;
+        const player = this.player.position;
+        this.wantedElapsed = (this.wantedElapsed || 0) + delta;
+        const concealed = this.isPlayerConcealed();
+        let spotted = false;
+        for (const instructor of this.instructors) {
+            const position = instructor.mesh.position;
+            const dx = player.x - position.x, dz = player.z - position.z;
+            const distance = Math.hypot(dx, dz);
+            if (!concealed && distance <= instructor.sightRadius && this.isInstructorSeeingPlayer(instructor)) {
+                spotted = true;
+                this.wantedLastSeen = { x: player.x, z: player.z };
+                instructor.mesh.rotation.y = Math.atan2(dx, dz);
+            }
+        }
+        const outsideAlertArea = Math.hypot(player.x - this.wantedCenter.x, player.z - this.wantedCenter.z) > this.wantedRadius;
+        if (!spotted && outsideAlertArea) this.wantedEscapeTime += delta;
+        else this.wantedEscapeTime = 0;
+
+        let caught = false;
+        const pursuitWarmup = 3;
+        const pursuitRamp = Math.min(1, Math.max(0, this.wantedElapsed - pursuitWarmup) / 4);
+        const smoothRamp = pursuitRamp * pursuitRamp * (3 - 2 * pursuitRamp);
+        for (const instructor of this.instructors) {
+            const position = instructor.mesh.position;
+            const target = this.wantedLastSeen || this.wantedCenter;
+            const dx = target.x - position.x, dz = target.z - position.z;
+            const distance = Math.hypot(dx, dz);
+            const topSpeed = instructor.useMotorcycle ? instructor.bikeSpeed : instructor.footSpeed;
+            const targetSpeed = topSpeed * smoothRamp;
+            instructor.speed += (targetSpeed - instructor.speed) * Math.min(1, 2.5 * delta);
+            if (instructor.patrolLights.length) {
+                instructor.patrolLights[0].visible = Math.sin(this.wantedElapsed * 12) >= 0;
+                instructor.patrolLights[1].visible = Math.sin(this.wantedElapsed * 12) < 0;
+            }
+            if (this.wantedElapsed >= pursuitWarmup && distance > 2.5) {
+                const step = Math.min(distance - 2.5, instructor.speed * delta);
+                position.x += dx / distance * step;
+                position.z += dz / distance * step;
+                if (spotted) {
+                    let diff = Math.atan2(dx, dz) - instructor.mesh.rotation.y;
+                    diff = Math.atan2(Math.sin(diff), Math.cos(diff));
+                    instructor.mesh.rotation.y += diff * Math.min(1, 6 * delta);
+                } else {
+                    instructor.patrolPhase += delta * 0.12;
+                    instructor.mesh.rotation.y = Math.atan2(dx, dz) + Math.sin(instructor.patrolPhase) * 0.2;
+                }
+                this.resolveCollisions(position, false);
+                for (const leg of instructor.legs) {
+                    leg.pivot.rotation.x = Math.sin(this.wantedElapsed * 10 + leg.side * Math.PI) * (instructor.useMotorcycle ? 0.08 : 0.48);
+                }
+            } else if (this.wantedElapsed >= pursuitWarmup && spotted) {
+                caught = true;
+            }
+        }
+        if (caught) {
+            this.onCaughtByInstructor();
+            return;
+        }
+        this.updateWantedStatus();
+        if (this.wantedEscapeTime >= 5) this.clearWanted();
+    }
+
+    // 被教官追上：輕微處理 —— 強制下車、解除通緝，沒有其他懲罰
+    onCaughtByInstructor() {
+        if (this.currentVehicle) this.interactWithVehicle();
+        this.clearWanted();
+        this.showToast('被教官抓到了！下次不要亂騎車喔 😅');
+    }
+
+    interactWithVehicle() {
+        const vehicleButton = document.getElementById('vehicle-btn');
+        const sprintButton = document.getElementById('sprint-btn');
+        if (this.currentVehicle) {
+            const vehicle = this.currentVehicle;
+            vehicle.mesh.position.set(this.player.position.x, 0, this.player.position.z);
+            vehicle.mesh.rotation.y = this.player.rotation.y;
+            vehicle.rider.visible = false;
+            this.player.visible = true;
+            this.playerRadius = 0.45;
+            this.currentVehicle = null;
+            this.currentSpeed = 0;
+            if (vehicleButton) vehicleButton.textContent = '騎乘';
+            if (sprintButton) sprintButton.textContent = '奔跑';
+            this.showToast('已下車');
+            return;
+        }
+        let nearest = null, nearestDistance = 5;
+        for (const vehicle of this.vehicles) {
+            const distance = Math.hypot(
+                this.player.position.x - vehicle.mesh.position.x,
+                this.player.position.z - vehicle.mesh.position.z
+            );
+            if (distance < nearestDistance) {
+                nearest = vehicle;
+                nearestDistance = distance;
+            }
+        }
+        if (!nearest) {
+            this.showToast('靠近腳踏車、機車或汽車再按 E');
+            return;
+        }
+        this.currentVehicle = nearest;
+        nearest.currentSpeed = 0;
+        this.currentSpeed = 0;
+        this.player.position.x = nearest.mesh.position.x;
+        this.player.position.z = nearest.mesh.position.z;
+        this.player.position.y = this.playerGround;
+        this.player.velocity.y = 0;
+        this.player.isJumping = false;
+        this.playerRadius = nearest.radius;
+        this.player.visible = false;
+        nearest.rider.visible = true;
+        if (vehicleButton) vehicleButton.textContent = '下車';
+        if (sprintButton) sprintButton.textContent = '加速';
+        this.reportVehicleTheft(nearest);
     }
 
     projectMapPoint(lon, lat) {
@@ -676,6 +1481,7 @@ class Game {
         const place = (kind, x, z) => {
             const t = this.makeTree(kind, 0.85 + rand() * 0.4, rand);
             t.position.set(x, 0, z); t.rotation.y = rand() * Math.PI * 2; this.scene.add(t);
+            this.coverZones.push({ x, z, radius: kind === 'palm' ? 2.8 : 3.8 });
         };
         for (let i = 0; i < bd.length; i++) {
             const a = bd[i], b = bd[(i + 1) % bd.length];
@@ -780,6 +1586,7 @@ class Game {
                 }
                 g.fillStyle = '#a8473b'; g.fillRect(ox, 76, w, 4);
                 g.fillStyle = css(s.band); g.fillRect(ox - 2, 92, w + 4, 26);
+                g.fillStyle = '#9a4a48'; g.fillRect(ox - 2, 92, w + 4, 3);   // 欄板上緣的酒紅飾條
                 g.fillStyle = 'rgba(0,0,0,0.08)'; g.fillRect(ox - 2, 108, w + 4, 10);
             }
             slab('#c8683a');
@@ -793,6 +1600,7 @@ class Game {
                 g.fillStyle = css(s.glass);
                 for (let k = 0; k < 3; k++) g.fillRect(x + 8 + k * 30, 62, 26, 26);
                 g.fillStyle = css(s.band); g.fillRect(x - 2, 96, w + 4, 16);
+                g.fillStyle = '#9a4a48'; g.fillRect(x - 2, 96, w + 4, 2);
             }
             slab('#c8683a');
             speckle(120, 0.03);
@@ -812,6 +1620,41 @@ class Game {
             g.fillStyle = '#b8aca6'; g.fillRect(0, 0, 256, 10);
             g.fillStyle = '#8d817b'; g.fillRect(0, 114, 256, 14);
             speckle(120, 0.04);
+        } else if (kind === 'lizeEnd') {
+            // 麗澤樓山牆：橘色牆＋小窗
+            for (const x of [44, 172]) {
+                g.fillStyle = css(s.frame); g.fillRect(x - 3, 30, 46, 54);
+                g.fillStyle = css(s.glass); g.fillRect(x, 33, 40, 48);
+                g.fillStyle = css(s.frame); g.fillRect(x + 19, 33, 2, 48);
+            }
+            slab('#c8683a');
+            speckle(140, 0.03);
+        } else if (kind === 'lizeBackG') {
+            // 麗澤樓背面一樓：灰色混凝土＋暗色窗帶
+            g.fillStyle = '#b9b5ab'; g.fillRect(0, 0, 256, 128);
+            g.fillStyle = '#2c3338'; g.fillRect(6, 34, 244, 58);
+            g.fillStyle = '#8a8f92';
+            for (let x = 6; x <= 250; x += 30) g.fillRect(x, 34, 3, 58);
+            g.fillRect(6, 60, 244, 2);
+            slab('#9d998f');
+            speckle(140, 0.04);
+        } else if (kind === 'lizeBack') {
+            // 麗澤樓背面（照片）：灰牆窗帶（含冷氣）＋整排粉紅色圓角欄板
+            g.fillStyle = '#d4d2cb'; g.fillRect(0, 0, 256, 128);
+            g.fillStyle = '#5f6e74'; g.fillRect(0, 18, 256, 44);
+            g.fillStyle = '#e9e7e0';
+            for (let x = 0; x <= 256; x += 32) g.fillRect(x, 18, 3, 44);
+            g.fillRect(0, 38, 256, 2);
+            g.fillStyle = 'rgba(255,255,255,0.18)'; g.fillRect(0, 18, 256, 8);
+            g.fillStyle = '#c9cdd0'; g.fillRect(150, 64, 26, 14);
+            g.fillStyle = '#6b7075'; for (let i = 0; i < 4; i++) g.fillRect(154 + i * 6, 67, 3, 8);
+            const grad = g.createLinearGradient(0, 78, 0, 118);
+            grad.addColorStop(0, '#d8665f'); grad.addColorStop(1, '#bd4a46');
+            g.fillStyle = grad; g.fillRect(0, 78, 256, 40);
+            g.fillStyle = '#e58a82'; g.fillRect(0, 78, 256, 3);
+            g.fillStyle = 'rgba(0,0,0,0.18)'; g.fillRect(0, 112, 256, 6);
+            slab('#a8403c');
+            speckle(120, 0.03);
         } else if (kind === 'pe' || kind === 'peArch') {
             // 體育運動館：鮭魚紅磚＋米色格柱＋白牆凹陽台，頂層為拱形
             g.strokeStyle = 'rgba(90,40,25,0.14)'; g.lineWidth = 1;
@@ -970,10 +1813,538 @@ class Game {
         return () => { h += 0x6D2B79F5; let t = Math.imul(h ^ (h >>> 15), 1 | h); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
     }
 
+    // ===================================================================
+    // 校史館（原「第一中學校講堂」，1937）
+    // 依三張照片重建：米黃洗石子牆、深藍灰金屬二落水屋頂。
+    //  ‧ 正面（山牆端）：深門廊＋三道門＋四根方柱、三扇高窗、金色「校史館」、兩側矮翼牆、山牆上三個小方窗
+    //  ‧ 左右長邊：七個開間，上層是細長高窗＋窗上橫飾板，下層是雨庇下的一排窗，各有一個入口；牆上有深色「校史館」
+    //  ‧ 三面共 5 道門（正面 3 道、左右各 1 道）都可以走進去，內部只有空殼（地板、牆、天花板），沒有設計內部
+    // ===================================================================
+    hallStuccoTexture() {
+        const c = document.createElement('canvas'); c.width = c.height = 256;
+        const g = c.getContext('2d');
+        g.fillStyle = '#e4cf98'; g.fillRect(0, 0, 256, 256);
+        const rand = this.seededRandom('hall-stucco');
+        for (let i = 0; i < 900; i++) {
+            g.fillStyle = rand() < 0.5 ? `rgba(120,95,50,${0.03 + rand() * 0.05})` : `rgba(255,248,225,${0.03 + rand() * 0.06})`;
+            g.fillRect(rand() * 256, rand() * 256, 1 + rand() * 4, 1 + rand() * 4);
+        }
+        for (let i = 0; i < 16; i++) {   // 淡淡的雨痕
+            g.fillStyle = `rgba(90,70,40,${0.02 + rand() * 0.035})`;
+            g.fillRect(rand() * 256, 0, 2 + rand() * 5, 120 + rand() * 136);
+        }
+        const t = new THREE.CanvasTexture(c);
+        t.wrapS = t.wrapT = THREE.RepeatWrapping; t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 8;
+        return t;
+    }
+
+    // 格子窗貼圖（木框＋深色玻璃），cols × rows 格
+    hallWindowTexture(cols, rows, frame = '#8f4a22') {
+        this._hallWinCache = this._hallWinCache || {};
+        const key = `${cols}x${rows}${frame}`;
+        if (this._hallWinCache[key]) return this._hallWinCache[key];
+        const m = 7, bar = 4, pw = 30, ph = 30;
+        const W = m * 2 + cols * pw + (cols - 1) * bar, H = m * 2 + rows * ph + (rows - 1) * bar;
+        const c = document.createElement('canvas'); c.width = W; c.height = H;
+        const g = c.getContext('2d');
+        g.fillStyle = frame; g.fillRect(0, 0, W, H);
+        for (let i = 0; i < cols; i++) for (let j = 0; j < rows; j++) {
+            const x = m + i * (pw + bar), y = m + j * (ph + bar);
+            const grad = g.createLinearGradient(0, y, 0, y + ph);
+            grad.addColorStop(0, '#6f8794'); grad.addColorStop(1, '#2a363f');
+            g.fillStyle = grad; g.fillRect(x, y, pw, ph);
+            g.fillStyle = 'rgba(255,255,255,0.14)';
+            g.beginPath(); g.moveTo(x, y + ph); g.lineTo(x + pw * 0.55, y); g.lineTo(x + pw * 0.8, y); g.lineTo(x + pw * 0.25, y + ph); g.fill();
+        }
+        const t = new THREE.CanvasTexture(c);
+        t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 8;
+        this._hallWinCache[key] = t;
+        return t;
+    }
+
+    // 木門扇貼圖：上半玻璃格、下半木板
+    hallDoorTexture() {
+        if (this._hallDoorTex) return this._hallDoorTex;
+        const c = document.createElement('canvas'); c.width = 64; c.height = 160;
+        const g = c.getContext('2d');
+        g.fillStyle = '#a4531f'; g.fillRect(0, 0, 64, 160);
+        g.fillStyle = '#c0692c'; g.fillRect(0, 0, 64, 4); g.fillRect(0, 0, 4, 160); g.fillRect(60, 0, 4, 160);
+        for (let i = 0; i < 2; i++) for (let j = 0; j < 4; j++) {
+            const x = 8 + i * 25, y = 10 + j * 25;
+            const grad = g.createLinearGradient(0, y, 0, y + 21);
+            grad.addColorStop(0, '#7b95a2'); grad.addColorStop(1, '#2d3a43');
+            g.fillStyle = grad; g.fillRect(x, y, 23, 21);
+        }
+        g.fillStyle = '#8a4218'; g.fillRect(8, 118, 48, 36);
+        g.strokeStyle = '#6d3213'; g.lineWidth = 2; g.strokeRect(12, 122, 40, 28);
+        const t = new THREE.CanvasTexture(c);
+        t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4;
+        this._hallDoorTex = t;
+        return t;
+    }
+
+    // 金屬屋頂貼圖（直立縫）
+    hallRoofTexture() {
+        const c = document.createElement('canvas'); c.width = 64; c.height = 64;
+        const g = c.getContext('2d');
+        g.fillStyle = '#4b5662'; g.fillRect(0, 0, 64, 64);
+        g.fillStyle = '#5d6975'; g.fillRect(0, 0, 4, 64);
+        g.fillStyle = '#39424c'; g.fillRect(4, 0, 2, 64);
+        const t = new THREE.CanvasTexture(c);
+        t.wrapS = t.wrapT = THREE.RepeatWrapping; t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 8;
+        return t;
+    }
+
+    // 立在牆上的字（dark/gold），chars 由左到右排列
+    makeCharSign(chars, w, h, color, ppm = 160) {
+        const c = document.createElement('canvas');
+        c.width = Math.round(w * ppm); c.height = Math.round(h * ppm);
+        const g = c.getContext('2d');
+        g.fillStyle = color;
+        g.font = `bold ${Math.round(c.height * 0.82)}px 'Microsoft JhengHei', 'PingFang TC', 'PMingLiU', 'Noto Serif TC', serif`;
+        g.textAlign = 'center'; g.textBaseline = 'middle';
+        chars.forEach((ch, i) => g.fillText(ch, c.width * (i + 0.5) / chars.length, c.height * 0.52));
+        const t = new THREE.CanvasTexture(c);
+        t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 8;
+        return new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshBasicMaterial({ map: t, transparent: true, depthWrite: false, side: THREE.DoubleSide }));
+    }
+
+    createHistoryHall(footprint, H) {
+        const dist = (p, q) => Math.hypot(p.x - q.x, p.z - q.z);
+        const n = footprint.length;
+        const edges = footprint.map((a, i) => ({ a, b: footprint[(i + 1) % n], l: dist(a, footprint[(i + 1) % n]) }));
+        const byLen = edges.slice().sort((p, q) => p.l - q.l);
+        const shorts = byLen.slice(0, 2), longs = byLen.slice(2);
+        const cx = footprint.reduce((s, p) => s + p.x, 0) / n, cz = footprint.reduce((s, p) => s + p.z, 0) / n;
+        const mid = e => ({ x: (e.a.x + e.b.x) / 2, z: (e.a.z + e.b.z) / 2 });
+        // 正面 = 兩條短邊（山牆端）中離校園主步道比較近的那一條
+        const ref = this.projectMapPoint(120.6859890, 24.1502640);
+        const front = shorts.slice().sort((p, q) => dist(mid(p), ref) - dist(mid(q), ref))[0];
+        let nx = -(front.b.z - front.a.z), nz = front.b.x - front.a.x;
+        const nl = Math.hypot(nx, nz); nx /= nl; nz /= nl;
+        const fm = mid(front);
+        if (nx * (fm.x - cx) + nz * (fm.z - cz) < 0) { nx = -nx; nz = -nz; }
+        const theta = Math.atan2(nx, nz);          // 區域 +z = 正面朝外；區域 +x = 站在正面外面看的右手邊
+        const W = (shorts[0].l + shorts[1].l) / 2, L = (longs[0].l + longs[1].l) / 2;
+
+        const t = 0.36;            // 牆厚
+        const R = 4.2;             // 屋脊高於簷口
+        const DOOR_H = 3.3;
+        const CANOPY_Y = 3.9;      // 長邊雨庇高度
+        const b = L / 7;           // 長邊開間寬
+        const hall = new THREE.Group();
+        hall.position.set(cx, 0, cz);
+        hall.rotation.y = theta;
+        const colliders = [], floorZones = [];
+
+        // ---- 材質 ----
+        const stuccoTex = this.hallStuccoTexture();
+        const std = (color, rough = 0.9, extra = {}) => new THREE.MeshStandardMaterial(Object.assign({ color, roughness: rough }, extra));
+        const M = {
+            stucco: std(0xffffff, 0.92, { map: stuccoTex, emissive: 0x2a2212 }),
+            trim: std(0xcdbb92),
+            trimDark: std(0xc2ac7c),
+            plinth: std(0xa89a7e, 0.95),
+            stone: std(0xb7b0a0, 0.95),
+            wood: std(0x8f4a22, 0.75),
+            floor: std(0xd8cfba, 0.9, { emissive: 0x3c352a }),
+            ceiling: std(0xe8dfc8, 0.95, { side: THREE.DoubleSide, emissive: 0x4c4533 }),
+            roof: std(0xffffff, 0.8, { map: this.hallRoofTexture(), side: THREE.DoubleSide }),
+            ridge: std(0x343b43, 0.8),
+            pipe: std(0x7b8084, 0.6, { metalness: 0.3 }),
+            gold: std(0xd8a82e, 0.4, { metalness: 0.5 })
+        };
+        const doorMat = new THREE.MeshStandardMaterial({ map: this.hallDoorTexture(), roughness: 0.7 });
+        const winMat = (cols, rows) => new THREE.MeshStandardMaterial({ map: this.hallWindowTexture(cols, rows), roughness: 0.35, metalness: 0.1 });
+
+        const box = (parent, w, h, d, mat, x, y, z, cast = true) => {
+            const geo = new THREE.BoxGeometry(w, h, d);
+            if (mat === M.stucco) {      // 讓牆面貼圖依實際尺寸平鋪（每 4 公尺一張）
+                const uv = geo.attributes.uv;
+                const dims = [[d, h], [d, h], [w, d], [w, d], [w, h], [w, h]];
+                for (let f = 0; f < 6; f++) for (let k = 0; k < 4; k++) {
+                    const i = f * 4 + k;
+                    uv.setXY(i, uv.getX(i) * dims[f][0] / 4, uv.getY(i) * dims[f][1] / 4);
+                }
+            }
+            const m = new THREE.Mesh(geo, mat);
+            m.position.set(x, y, z);
+            m.castShadow = cast; m.receiveShadow = true;
+            parent.add(m);
+            return m;
+        };
+        const plane = (parent, mat, w, h, x, y, z) => {
+            const m = new THREE.Mesh(new THREE.PlaneGeometry(w, h), mat);
+            m.position.set(x, y, z);
+            parent.add(m);
+            return m;
+        };
+        const addLeaves = (parent, x, halfW, z) => {      // 兩扇打開的玻璃木門（向外開）
+            const lw = halfW - 0.05;
+            for (const s of [-1, 1]) {
+                const pivot = new THREE.Group();
+                pivot.position.set(x + s * halfW, 0.1, z);
+                pivot.rotation.y = s * 1.45;
+                const leaf = new THREE.Mesh(new THREE.BoxGeometry(lw, 3.1, 0.06), doorMat);
+                leaf.position.set(-s * lw / 2, 1.55, 0);
+                leaf.castShadow = true;
+                pivot.add(leaf);
+                parent.add(pivot);
+            }
+        };
+        const spans = (lo, hi, ops) => {     // 牆扣掉門洞之後剩下的實牆區段
+            const out = []; let cur = lo;
+            for (const o of ops) { const a = o.c - o.w / 2; if (a > cur) out.push([cur, a]); cur = o.c + o.w / 2; }
+            if (cur < hi) out.push([cur, hi]);
+            return out;
+        };
+
+        // ---- 地板（內部只有空殼）----
+        box(hall, W - 2 * t, 0.1, L - 2 * t, M.floor, 0, 0.05, 0, false);
+        floorZones.push([-W / 2 + t, W / 2 - t, -L / 2 + t, L / 2 - t, 0.1]);
+
+        // ---- 牆身（有門洞）----
+        // 正面：三道門
+        const frontDoors = [-2.75, 0, 2.75].map(c => ({ c, w: 2.1, h: DOOR_H }));
+        for (const [a, bb] of spans(-W / 2 + t, W / 2 - t, frontDoors)) {
+            box(hall, bb - a, H, t, M.stucco, (a + bb) / 2, H / 2, L / 2 - t / 2);
+            box(hall, bb - a, 0.55, 0.08, M.plinth, (a + bb) / 2, 0.275, L / 2 + 0.04);
+            colliders.push([a, bb, L / 2 - t, L / 2]);
+        }
+        for (const o of frontDoors) {
+            box(hall, o.w, H - o.h, t, M.stucco, o.c, (o.h + H) / 2, L / 2 - t / 2);
+            box(hall, o.w, 0.1, t, M.stone, o.c, 0.05, L / 2 - t / 2, false);   // 門檻
+        }
+        // 背面：整面實牆
+        box(hall, W - 2 * t, H, t, M.stucco, 0, H / 2, -L / 2 + t / 2);
+        box(hall, W - 2 * t, 0.55, 0.08, M.plinth, 0, 0.275, -L / 2 - 0.04);
+        colliders.push([-W / 2 + t, W / 2 - t, -L / 2, -L / 2 + t]);
+        // 山牆三角
+        for (const zStart of [L / 2 - t, -L / 2]) {
+            const sh = new THREE.Shape();
+            sh.moveTo(-W / 2, 0); sh.lineTo(W / 2, 0); sh.lineTo(0, R - 0.14); sh.closePath();
+            const gg = new THREE.ExtrudeGeometry(sh, { depth: t, bevelEnabled: false });
+            const uv = gg.attributes.uv;
+            for (let i = 0; i < uv.count; i++) uv.setXY(i, uv.getX(i) / 4, uv.getY(i) / 4);
+            gg.translate(0, H, zStart);
+            const gm = new THREE.Mesh(gg, M.stucco);
+            gm.castShadow = true; gm.receiveShadow = true;
+            hall.add(gm);
+        }
+        // 長邊：各一道門（由正面數過來第 3 個開間）
+        const doorZ = L / 2 - 2.5 * b;
+        const sideDoor = [{ c: doorZ, w: 2.2, h: DOOR_H }];
+        for (const sx of [-1, 1]) {
+            for (const [a, bb] of spans(-L / 2, L / 2, sideDoor)) {
+                box(hall, t, H, bb - a, M.stucco, sx * (W / 2 - t / 2), H / 2, (a + bb) / 2);
+                box(hall, 0.08, 0.55, bb - a, M.plinth, sx * (W / 2 + 0.04), 0.275, (a + bb) / 2);
+                colliders.push(sx > 0 ? [W / 2 - t, W / 2, a, bb] : [-W / 2, -W / 2 + t, a, bb]);
+            }
+            const o = sideDoor[0];
+            box(hall, t, H - o.h, o.w, M.stucco, sx * (W / 2 - t / 2), (o.h + H) / 2, o.c);
+            box(hall, t, 0.1, o.w, M.stone, sx * (W / 2 - t / 2), 0.05, o.c, false);
+            // 門前走道高度（讓人走上門檻不會陷進去）
+            const x0 = sx > 0 ? W / 2 - t : -W / 2 - 1.0, x1 = sx > 0 ? W / 2 + 1.0 : -W / 2 + t;
+            floorZones.push([x0, x1, doorZ - 1.6, doorZ + 1.6, 0.1]);
+            const y0 = sx > 0 ? W / 2 + 1.0 : -W / 2 - 1.5, y1 = sx > 0 ? W / 2 + 1.5 : -W / 2 - 1.0;
+            floorZones.push([y0, y1, doorZ - 1.9, doorZ + 1.9, 0.05]);
+        }
+
+        // ---- 屋頂（深藍灰金屬、直立縫）＋ 內側米色天花板 ----
+        const oh = 0.7, ohz = 0.6, slope = R / (W / 2);
+        const Xe = W / 2 + oh, Ze = L / 2 + ohz, Ye = H - oh * slope;
+        const slopeLen = Math.hypot(Xe, R + oh * slope);
+        const roofSide = (sx, drop, mat, cast) => {
+            const v = [[sx * Xe, Ye - drop, -Ze], [sx * Xe, Ye - drop, Ze], [0, H + R - drop, Ze], [0, H + R - drop, -Ze]];
+            const pos = v.flat();
+            const uvs = [-Ze / 0.6, 0, Ze / 0.6, 0, Ze / 0.6, slopeLen / 3, -Ze / 0.6, slopeLen / 3];
+            const g = new THREE.BufferGeometry();
+            g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+            g.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+            g.setIndex([0, 1, 2, 0, 2, 3]);
+            g.computeVertexNormals();
+            const m = new THREE.Mesh(g, mat);
+            m.castShadow = cast; m.receiveShadow = true;
+            hall.add(m);
+        };
+        for (const sx of [-1, 1]) {
+            roofSide(sx, 0, M.roof, true);
+            roofSide(sx, 0.1, M.ceiling, false);
+            box(hall, 0.1, 0.26, 2 * Ze, M.ridge, sx * Xe, Ye - 0.04, 0);     // 簷口封板
+        }
+        box(hall, 0.5, 0.22, 2 * Ze + 0.1, M.ridge, 0, H + R + 0.03, 0);      // 屋脊
+
+        // ---- 長邊立面（左右各一）----
+        const decorLong = (sx) => {
+            const g = new THREE.Group();
+            g.position.set(sx * W / 2, 0, 0);
+            g.rotation.y = sx * Math.PI / 2;           // g 的 +z = 朝外，+x = 站在外面看的右手邊
+            hall.add(g);
+            const ux = z => -sx * z;                   // 區域 z → g 的 x
+            const seam = i => L / 2 - i * b;
+            const zc = i => L / 2 - (i + 0.5) * b;
+            box(g, L, 0.2, 0.5, M.trim, 0, CANOPY_Y + 0.05, 0.25);                 // 一樓雨庇
+            box(g, L + 0.1, 0.26, 0.34, M.trim, 0, H - 0.13, 0.17);                // 簷口飾帶
+            for (let i = 1; i <= 6; i++) box(g, 0.5, H - 4.2, 0.14, M.trim, ux(seam(i)), (4.15 + H - 0.26) / 2, 0.07);   // 壁柱
+            const tallWin = winMat(2, 8), lowWin = winMat(4, 3);
+            for (let i = 0; i < 7; i++) {
+                const x = ux(zc(i));
+                // 上層：細長高窗、窗台、窗上橫飾板
+                box(g, 1.0, 3.05, 0.05, M.trim, x, 6.05, 0.025);
+                plane(g, tallWin, 0.85, 2.9, x, 6.05, 0.058);
+                box(g, 1.25, 0.12, 0.26, M.stone, x, 4.5, 0.13);
+                box(g, 2.4, 0.7, 0.05, M.trimDark, x, 7.85, 0.025);
+                // 下層：雨庇下的窗（第 3 開間是入口、最後 2 個開間是實牆）
+                if (i === 0 || i === 1 || i === 3 || i === 4) {
+                    box(g, 2.7, 2.4, 0.06, M.wood, x, 2.1, 0.03);
+                    plane(g, lowWin, 2.5, 2.2, x, 2.1, 0.065);
+                    box(g, 3.0, 0.12, 0.28, M.stone, x, 0.88, 0.14);
+                }
+            }
+            // 入口：木門框、兩扇打開的玻璃木門、台階
+            const dx = ux(doorZ);
+            for (const s of [-1, 1]) box(g, 0.16, DOOR_H + 0.15, t + 0.1, M.wood, dx + s * 1.18, (DOOR_H + 0.15) / 2, -t / 2 + 0.05);
+            box(g, 2.52, 0.18, t + 0.1, M.wood, dx, DOOR_H + 0.09, -t / 2 + 0.05);
+            addLeaves(g, dx, 1.1, 0.06);
+            box(g, 3.2, 0.1, 1.0, M.stone, dx, 0.05, 0.5);
+            box(g, 3.8, 0.05, 0.5, M.stone, dx, 0.025, 1.25);
+            // 排水管
+            for (const i of [1, 6]) {
+                const pipe = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, H - 0.45, 8), M.pipe);
+                pipe.position.set(ux(seam(i)), 0.15 + (H - 0.45) / 2, 0.21);
+                g.add(pipe);
+            }
+            // 牆上的深色「校史館」（由右到左讀）
+            const sign = this.makeCharSign(['館', '史', '校'], 3.6, 1.0, '#34201a');
+            sign.position.set(ux(seam(3)), 5.9, 0.16);
+            g.add(sign);
+        };
+        decorLong(-1);
+        decorLong(1);
+
+        // ---- 正面立面（山牆端）----
+        const f = new THREE.Group();
+        f.position.set(0, 0, L / 2);
+        hall.add(f);
+        const CB = 0.4;                       // 中央塊凸出牆面的深度
+        box(f, 10.2, H - 4.15, CB, M.stucco, 0, (4.15 + H) / 2, CB / 2);
+        box(f, 10.2, 0.25, 2.6, M.trim, 0, 4.025, 1.3);                           // 深門廊的雨庇
+        box(f, 10.7, 0.3, 0.9, M.trim, 0, H, 0.4);                                // 中央塊簷口
+        for (const px of [-4.125, -1.375, 1.375, 4.125]) {                        // 四根方柱
+            box(f, 0.65, 3.9, 0.65, M.stucco, px, 1.95, 2.2);
+            box(f, 0.78, 0.35, 0.78, M.plinth, px, 0.175, 2.2);
+            box(f, 0.8, 0.14, 0.8, M.trim, px, 3.83, 2.2);
+            colliders.push([px - 0.39, px + 0.39, L / 2 + 2.2 - 0.39, L / 2 + 2.2 + 0.39]);
+        }
+        box(f, 9.4, 0.1, 2.6, M.stone, 0, 0.05, 1.3, false);                      // 門廊地坪
+        box(f, 10.0, 0.05, 0.6, M.stone, 0, 0.025, 2.9, false);                   // 前階
+        floorZones.push([-4.7, 4.7, L / 2 - t, L / 2 + 2.6, 0.1]);
+        floorZones.push([-5.0, 5.0, L / 2 + 2.6, L / 2 + 3.2, 0.05]);
+        const wingW = W / 2 - 5.1;
+        for (const sx of [-1, 1]) {                                               // 兩側矮翼牆
+            const xc = sx * (5.1 + W / 2) / 2;
+            box(f, wingW, 4.3, 0.9, M.stucco, xc, 2.15, 0.45);
+            box(f, wingW + 0.08, 0.55, 0.98, M.plinth, xc, 0.275, 0.45);
+            box(f, wingW + 0.1, 0.14, 1.02, M.stone, xc, 4.37, 0.45);
+            box(f, 2.4, 2.1, 0.06, M.wood, xc, 2.25, 0.93);
+            plane(f, winMat(3, 3), 2.2, 1.9, xc, 2.25, 0.965);
+            box(f, 2.7, 0.12, 0.26, M.stone, xc, 1.14, 1.0);
+            colliders.push(sx > 0 ? [5.1, W / 2, L / 2, L / 2 + 0.9] : [-W / 2, -5.1, L / 2, L / 2 + 0.9]);
+            box(f, 0.9, 0.7, 1.2, M.stone, sx * 5.5, 0.35, 3.5);                  // 門前石墩
+            colliders.push([sx * 5.5 - 0.45, sx * 5.5 + 0.45, L / 2 + 2.9, L / 2 + 4.1]);
+        }
+        for (const x of [-2.75, 0, 2.75]) {                                       // 三扇高窗＋窗上裝飾板
+            box(f, 2.15, 3.15, 0.06, M.wood, x, 6.1, CB + 0.03);
+            plane(f, winMat(3, 6), 2.0, 3.0, x, 6.1, CB + 0.065);
+            box(f, 2.0, 0.6, 0.05, M.trimDark, x, 8.0, CB + 0.025);
+            addLeaves(f, x, 1.05, 0.06);
+            const orn = box(f, 0.22, 0.22, 0.03, M.gold, x, 8.0, CB + 0.06);
+            orn.rotation.z = Math.PI / 4;
+        }
+        const gold = this.makeCharSign(['館', '史', '校'], 8.25, 1.0, '#d8a82e');   // 金色「校史館」（由右到左讀）
+        gold.position.set(0, 5.0, CB + 0.09);
+        f.add(gold);
+        for (const x of [-0.8, 0, 0.8]) plane(f, winMat(1, 2), 0.5, 0.65, x, H + 1.35, 0.03);   // 山牆上三個小方窗
+
+        this.scene.add(hall);
+        const cos = Math.cos(theta), sin = Math.sin(theta);
+        this.hall = {
+            cx, cz, W, L, t, H, colliders, floorZones,
+            toLocal: (x, z) => ({ x: (x - cx) * cos - (z - cz) * sin, z: (x - cx) * sin + (z - cz) * cos }),
+            toWorld: (lx, lz) => ({ x: cx + lx * cos + lz * sin, z: cz - lx * sin + lz * cos })
+        };
+        this.buildings.push({
+            mesh: hall, name: '校史館', interactive: true, footprint, mapColor: 0xd2bf94,
+            walkway: null, tunnel: null, customCollision: true, height: H + 2.5
+        });
+    }
+
+    // 校史館的牆、柱、石墩碰撞（都是區域座標下的長方形，門洞留空，所以走得進去）
+    resolveHallCollisions(pos) {
+        const h = this.hall;
+        if (!h) return;
+        const l = h.toLocal(pos.x, pos.z);
+        if (Math.abs(l.x) > h.W / 2 + 7 || Math.abs(l.z) > h.L / 2 + 7) return;
+        const r = this.playerRadius;
+        let moved = false;
+        for (let pass = 0; pass < 2; pass++) {
+            for (const [x0, x1, z0, z1] of h.colliders) {
+                const px = Math.max(x0, Math.min(x1, l.x)), pz = Math.max(z0, Math.min(z1, l.z));
+                const dx = l.x - px, dz = l.z - pz, d = Math.hypot(dx, dz);
+                if (d >= r) continue;
+                if (d > 1e-6) { l.x = px + dx / d * (r + 0.001); l.z = pz + dz / d * (r + 0.001); }
+                else {
+                    const pl = l.x - x0, pr = x1 - l.x, pf = l.z - z0, pb = z1 - l.z, m = Math.min(pl, pr, pf, pb);
+                    if (m === pl) l.x = x0 - r; else if (m === pr) l.x = x1 + r; else if (m === pf) l.z = z0 - r; else l.z = z1 + r;
+                }
+                moved = true;
+            }
+        }
+        if (moved) { const w = h.toWorld(l.x, l.z); pos.x = w.x; pos.z = w.z; }
+    }
+
+    // ───────── 坡道／台階／欄杆：區域座標（edgeFrame 的 group）轉世界座標 ─────────
+    _frame(g) { return { px: g.position.x, pz: g.position.z, c: Math.cos(g.rotation.y), s: Math.sin(g.rotation.y) }; }
+    _toLocal(f, x, z) { const dx = x - f.px, dz = z - f.pz; return { x: dx * f.c - dz * f.s, z: dx * f.s + dz * f.c }; }
+    _toWorld(f, lx, lz) { return { x: f.px + lx * f.c + lz * f.s, z: f.pz - lx * f.s + lz * f.c }; }
+    // 可走表面：矩形範圍內，高度由 h(lx, lz) 決定（數字＝平台，函式＝坡道／台階）
+    addWalkSurface(g, x0, x1, z0, z1, h) {
+        const f = this._frame(g), cw = this._toWorld(f, (x0 + x1) / 2, (z0 + z1) / 2);
+        this.surfaces.push({ f, x0, x1, z0, z1, h: typeof h === 'function' ? h : () => h, cx: cw.x, cz: cw.z, R: Math.hypot(x1 - x0, z1 - z0) / 2 + 1 });
+    }
+    // 擋人的長方體：玩家腳高低於 top - 0.2 就推開（欄杆、矮牆、販賣機…）
+    addWalkBlocker(g, x0, x1, z0, z1, top) {
+        const f = this._frame(g), cw = this._toWorld(f, (x0 + x1) / 2, (z0 + z1) / 2);
+        this.blockers.push({ f, x0, x1, z0, z1, top, cx: cw.x, cz: cw.z, R: Math.hypot(x1 - x0, z1 - z0) / 2 + 1.5 });
+    }
+    addWalkColumn(g, lx, lz, r) { const w = this._toWorld(this._frame(g), lx, lz); this.columns.push({ x: w.x, z: w.z, r }); }
+    getSurfaceY(x, z) {
+        let y = 0;
+        for (const sf of this.surfaces) {
+            if (Math.abs(x - sf.cx) > sf.R || Math.abs(z - sf.cz) > sf.R) continue;
+            const l = this._toLocal(sf.f, x, z);
+            if (l.x < sf.x0 || l.x > sf.x1 || l.z < sf.z0 || l.z > sf.z1) continue;
+            const v = sf.h(l.x, l.z);
+            if (v > y) y = v;
+        }
+        return y;
+    }
+    getGroundY(x, z) { return Math.max(this.getFloorY(x, z), this.getSurfaceY(x, z)); }
+    // 欄杆／矮牆：把玩家推開（跟校史館碰撞盒同一套算法）
+    resolveBlockers(pos, footY) {
+        const r = this.playerRadius;
+        for (const b of this.blockers) {
+            if (footY >= b.top - 0.2) continue;
+            if (Math.abs(pos.x - b.cx) > b.R || Math.abs(pos.z - b.cz) > b.R) continue;
+            const l = this._toLocal(b.f, pos.x, pos.z);
+            const px = Math.max(b.x0, Math.min(b.x1, l.x)), pz = Math.max(b.z0, Math.min(b.z1, l.z));
+            const dx = l.x - px, dz = l.z - pz, d = Math.hypot(dx, dz);
+            if (d >= r) continue;
+            if (d > 1e-6) { l.x = px + dx / d * (r + 0.001); l.z = pz + dz / d * (r + 0.001); }
+            else {
+                const pl = l.x - b.x0, pr = b.x1 - l.x, pf = l.z - b.z0, pb = b.z1 - l.z, m = Math.min(pl, pr, pf, pb);
+                if (m === pl) l.x = b.x0 - r; else if (m === pr) l.x = b.x1 + r; else if (m === pf) l.z = b.z0 - r; else l.z = b.z1 + r;
+            }
+            const w = this._toWorld(b.f, l.x, l.z); pos.x = w.x; pos.z = w.z;
+        }
+    }
+    // 這個位置（含前進方向多看一點）對現在腳高來說是不是「太高爬不上去」
+    tooHigh(x, z, dx, dz, footY) {
+        if (this.getSurfaceY(x, z) - footY > this.maxStep) return true;
+        const d = Math.hypot(dx, dz);
+        return d > 1e-6 && this.getSurfaceY(x + dx / d * 0.4, z + dz / d * 0.4) - footY > this.maxStep;
+    }
+    // 每一小步移動後呼叫：欄杆推開、太高的地方像撞牆（試著沿牆滑）
+    applyWalkRules(p, ox, oz) {
+        const footY = p.position.y - this.playerGround;
+        this.resolveBlockers(p.position, footY);
+        const nx = p.position.x, nz = p.position.z, dx = nx - ox, dz = nz - oz;
+        if (!this.tooHigh(nx, nz, dx, dz, footY)) return;
+        if (Math.abs(dx) > 1e-6 && !this.tooHigh(nx, oz, dx, 0, footY)) { p.position.x = nx; p.position.z = oz; }
+        else if (Math.abs(dz) > 1e-6 && !this.tooHigh(ox, nz, 0, dz, footY)) { p.position.x = ox; p.position.z = nz; }
+        else { p.position.x = ox; p.position.z = oz; }
+    }
+
+    // 校史館門檻、台階、室內地板的高度（其他地方回傳 0）
+    getFloorY(x, z) {
+        const h = this.hall;
+        if (!h) return 0;
+        const l = h.toLocal(x, z);
+        let y = 0;
+        for (const [x0, x1, z0, z1, hh] of h.floorZones) if (l.x >= x0 && l.x <= x1 && l.z >= z0 && l.z <= z1 && hh > y) y = hh;
+        return y;
+    }
+
+    // 人在校史館裡面時，把鏡頭拉近，不要穿到牆外或屋頂外
+    // 視線（玩家頭部 → 鏡頭）在建築高度以下第一次碰到牆的位置（0~1；1＝沒被擋）
+    cameraHitT(target, cam) {
+        const dx = cam.x - target.x, dy = cam.y - target.y, dz = cam.z - target.z;
+        let k = 1;
+        for (const b of this.buildings) {
+            if (!b.footprint || !b.height) continue;
+            const fp = b.footprint;
+            if (b.walkway && target.x >= b.walkway.minX && target.x <= b.walkway.maxX && target.z >= b.walkway.minZ && target.z <= b.walkway.maxZ) continue;   // 人在走道裡
+            if (this.isPointInPolygon(target.x, target.z, fp)) continue;                                                                                    // 人在樓內
+            for (let i = 0; i < fp.length; i++) {
+                const a = fp[i], c = fp[(i + 1) % fp.length];
+                const ex = c.x - a.x, ez = c.z - a.z;
+                const den = dx * ez - dz * ex;
+                if (Math.abs(den) < 1e-9) continue;
+                const t = ((a.x - target.x) * ez - (a.z - target.z) * ex) / den;
+                const u = ((a.x - target.x) * dz - (a.z - target.z) * dx) / den;
+                if (t <= 0 || t >= 1 || u < 0 || u > 1) continue;
+                if (target.y + dy * t > b.height + 0.3) continue;                      // 視線在屋頂上方，沒被擋
+                k = Math.min(k, t);
+            }
+        }
+        return k;
+    }
+
+    // 鏡頭防穿牆：水平方向（你選的角度）不變，鏡頭離玩家的「總距離」也不變；
+    // 但如果水平方向被牆擋住，鏡頭就沿著牆面往上爬、從上方斜斜往下看玩家（不縮短距離、不會放大、人不會消失）
+    climbCameraOverWalls(target, cam, delta) {
+        const dx = cam.x - target.x, dz = cam.z - target.z, dy = cam.y - target.y;
+        const h0 = Math.hypot(dx, dz);
+        if (h0 < 1e-6) return;
+        const d3 = Math.hypot(h0, dy);
+        const k = this.cameraHitT(target, cam);
+        let want = 1;
+        if (k < 1) want = Math.max(0.3, h0 * k - 0.35) / h0;                           // 水平方向最多退到牆前面一點點（至少 0.3 公尺，避免正上方）
+        const prev = this._camK === undefined ? 1 : this._camK;
+        const kk = want < prev ? want : Math.min(want, prev + 2.5 * delta);              // 被擋時馬上讓開，不被擋時慢慢退回
+        this._camK = kk;
+        if (kk >= 0.999) return;
+        const h = h0 * kk;
+        cam.x = target.x + dx * kk;
+        cam.z = target.z + dz * kk;
+        cam.y = target.y + Math.sqrt(Math.max(0.01, d3 * d3 - h * h));
+    }
+
+    fitCameraInHall(target, cam) {
+        const h = this.hall;
+        if (!h) return;
+        const lt = h.toLocal(target.x, target.z);
+        if (Math.abs(lt.x) > h.W / 2 - h.t - 0.05 || Math.abs(lt.z) > h.L / 2 - h.t - 0.05) return;   // 人在外面
+        const lc = h.toLocal(cam.x, cam.z);
+        const bx = h.W / 2 - h.t - 0.3, bz = h.L / 2 - h.t - 0.3, ymax = h.H - 0.3;
+        const dx = lc.x - lt.x, dz = lc.z - lt.z, dy = cam.y - target.y;
+        let k = 1;
+        if (dx > 0 && lc.x > bx) k = Math.min(k, (bx - lt.x) / dx);
+        if (dx < 0 && lc.x < -bx) k = Math.min(k, (-bx - lt.x) / dx);
+        if (dz > 0 && lc.z > bz) k = Math.min(k, (bz - lt.z) / dz);
+        if (dz < 0 && lc.z < -bz) k = Math.min(k, (-bz - lt.z) / dz);
+        if (dy > 0 && cam.y > ymax) k = Math.min(k, (ymax - target.y) / dy);
+        k = Math.max(0.12, k);
+        cam.x = target.x + (cam.x - target.x) * k;
+        cam.y = target.y + dy * k;
+        cam.z = target.z + (cam.z - target.z) * k;
+    }
+
     createMappedBuilding(name, coordinates, height, floors, color) {
         const style = this.getBuildingStyle(name);
         height = height * this.heightScale;
         const footprint = coordinates.map(([lon, lat]) => this.projectMapPoint(lon, lat));
+        if (name === '校史館') { this.createHistoryHall(footprint, height); return; }   // 校史館：專用模型，門可進入
         const shape = this.footprintToShape(footprint);
         const arcadeHeight = 0; // 一樓一律砌實（牆從地面 0 公尺開始），不再做挑空騎樓
         const floorHeight = height / floors;
@@ -992,6 +2363,15 @@ class Game {
                 const tileStyle = Object.assign({}, style, { tile: style.tiles[start], tiles: undefined });
                 const mat = new THREE.MeshStandardMaterial({ map: this.makeFacadeTexture(tileStyle), roughness: 0.85, side: THREE.DoubleSide });
                 const top = end === floors;
+                if (name === '麗澤樓') {
+                    // 正面（中庭側）＝凹陽台；背面（照片）＝粉紅欄板＋窗帶；兩端山牆＝橘牆
+                    const kinds = this.classifyLizeEdges(footprint);
+                    const mk = t => new THREE.MeshStandardMaterial({ map: this.makeFacadeTexture(Object.assign({}, style, { tile: t, tiles: undefined })), roughness: 0.85, side: THREE.DoubleSide });
+                    const y0 = start * floorHeight, y1 = top ? height : end * floorHeight;
+                    this.addFootprintWalls(building, footprint, y0, y1, mat, roofMaterial, floorHeight, top, tunnel, i => kinds[i] === 'front');
+                    this.addFootprintWalls(building, footprint, y0, y1, mk(start === 0 ? 'lizeBackG' : 'lizeBack'), roofMaterial, floorHeight, false, tunnel, i => kinds[i] === 'back');
+                    this.addFootprintWalls(building, footprint, y0, y1, mk('lizeEnd'), roofMaterial, floorHeight, false, tunnel, i => kinds[i] === 'end');
+                } else
                 this.addFootprintWalls(building, footprint, start * floorHeight, top ? height : end * floorHeight, mat, roofMaterial, floorHeight, top, tunnel);
                 start = end;
             }
@@ -1024,7 +2404,7 @@ class Game {
         if (name === '莊敬樓') this.addZhuangjingPortico(footprint, height);
         if (name === '慎思樓') this.addShensiFacade(footprint, height, floors);
         if (name === '景賢樓') { this.addJingxianFacade(footprint, height, floors); this.addTianxinObservatory(footprint, height); }
-        if (name === '麗澤樓') this.addLizeDetails(footprint, height, floors);
+        if (name === '麗澤樓') { this.addLizeDetails(footprint, height, floors); this.addLizeBack(footprint); }
         if (name === '體育運動館') this.addPEDetails(footprint, height);
         if (name === '科學館') this.addScienceEntrance(footprint, height);
         if (!['慎思樓', '莊敬樓', '麗澤樓', '科學館', '體育運動館'].includes(name)) this.addBuildingNameplate(name, footprint, height);
@@ -1034,6 +2414,7 @@ class Game {
             name,
             interactive: true,
             footprint,
+            height,
             mapColor: style.wall,
             walkway: tunnel ? tunnel.walkway : (arcadeHeight ? this.getArcadeBounds(footprint, name === '慎思樓' ? 5 : 4.5) : null),
             tunnel
@@ -1076,12 +2457,13 @@ class Game {
         return out;
     }
 
-    addFootprintWalls(group, footprint, baseHeight, height, material, roofMaterial = material, floorHeight = 3.5, withRoof = true, tunnel = null) {
+    addFootprintWalls(group, footprint, baseHeight, height, material, roofMaterial = material, floorHeight = 3.5, withRoof = true, tunnel = null, edgeFilter = null) {
         const pos = [], uv = [];
         let run = 0;
         for (let i = 0; i < footprint.length; i++) {
             const a = footprint[i], b = footprint[(i + 1) % footprint.length];
             const len = Math.hypot(b.x - a.x, b.z - a.z);
+            if (edgeFilter && !edgeFilter(i)) { run += len; continue; }   // 只畫被選中的牆（麗澤樓正面／背面／山牆用不同貼圖）
             for (const sg of this.splitEdgeByTunnel(a, b, tunnel)) {
                 const low = sg.inside ? Math.max(baseHeight, tunnel.height) : baseHeight;
                 if (low >= height - 0.01) continue;
@@ -1519,8 +2901,11 @@ class Game {
         else { for (const sx of [-1, 1]) add(new THREE.CylinderGeometry(0.07, 0.07, 3.3, 8), metal, sx * px, 1.65, pz); }
         for (let i = 0; i < 3; i++) {
             const h = 0.14 * (3 - i);
-            add(new THREE.BoxGeometry(cw - 0.4, h, 0.5), new THREE.MeshStandardMaterial({ color: 0xb9b5aa, roughness: 0.95 }), 0, h / 2, 0.4 + i * 0.5 + (porch ? 0.6 : 0));
+            const zc = 0.4 + i * 0.5 + (porch ? 0.6 : 0);
+            add(new THREE.BoxGeometry(cw - 0.4, h, 0.5), new THREE.MeshStandardMaterial({ color: 0xb9b5aa, roughness: 0.95 }), 0, h / 2, zc);
+            this.addWalkSurface(g, -(cw - 0.4) / 2, (cw - 0.4) / 2, zc - 0.25, zc + 0.25, h);
         }
+        for (const sx of [-1, 1]) this.addWalkColumn(g, sx * px, pz, porch ? 0.26 : 0.07);
         this.scene.add(g);
     }
 
@@ -1652,7 +3037,34 @@ class Game {
         return t;
     }
 
-    // 麗澤樓（照片）：中庭側正面入口（粉灰花崗岩圓柱＋金色校名）、南端山牆的「飛龍乘雲」、北端接操場的小門與鋪面
+    // 外法線：往牆外推一點點，看落在多邊形裡還是外面（麗澤樓是凹字形，不能用重心判斷）
+    lizeOutward(footprint, i) {
+        const n = footprint.length, a = footprint[i], b = footprint[(i + 1) % n];
+        const len = Math.hypot(b.x - a.x, b.z - a.z) || 1;
+        let nx = -(b.z - a.z) / len, nz = (b.x - a.x) / len;
+        const px = (a.x + b.x) / 2 + nx * 0.3, pz = (a.z + b.z) / 2 + nz * 0.3;
+        let inside = false;
+        for (let k = 0, j = n - 1; k < n; j = k++) {
+            const p = footprint[k], q = footprint[j];
+            if ((p.z > pz) !== (q.z > pz) && px < (q.x - p.x) * (pz - p.z) / (q.z - p.z) + p.x) inside = !inside;
+        }
+        if (inside) { nx = -nx; nz = -nz; }
+        return { nx, nz, len };
+    }
+
+    // 麗澤樓每面牆是「正面（朝中庭）／背面／山牆與轉折」
+    classifyLizeEdges(footprint) {
+        const cx = footprint.reduce((a, p) => a + p.x, 0) / footprint.length;
+        const dx = cx > 0 ? -1 : 1;   // 朝向中庭（x=0）的方向
+        return footprint.map((a, i) => {
+            const { nx, len } = this.lizeOutward(footprint, i);
+            if (len < 0.01) return 'end';
+            const dot = nx * dx;
+            return dot > 0.5 ? 'front' : dot < -0.5 ? 'back' : 'end';
+        });
+    }
+
+    // 麗澤樓（照片）：中庭側正面入口（圓弧花崗岩門廊＋半圓台階＋坡道＋水池）、南端山牆的「飛龍乘雲」、北端接操場的小門與鋪面
     addLizeDetails(footprint, height, floors) {
         const cx = footprint.reduce((a, p) => a + p.x, 0) / footprint.length;
         const cz = footprint.reduce((a, p) => a + p.z, 0) / footprint.length;
@@ -1662,16 +3074,163 @@ class Game {
         const dark = new THREE.MeshStandardMaterial({ color: 0x1f2428, roughness: 0.3, metalness: 0.2 });
         const stone = new THREE.MeshStandardMaterial({ color: 0x9a918b, roughness: 0.95 });
 
-        // (1) 正面入口（面向中庭；長邊約 42% 處）
+        // (1) 正面入口（面向中庭；長邊約 42% 處）：圓弧凸出的粉灰花崗岩門廊、兩根粗圓柱、半圓形台階、右側無障礙坡道、左側水池
         const front = this.getFacingEdge(footprint, 0, cz);
         if (front) {
             const { g, add } = this.edgeFrame(front, 0.42);
-            add(new THREE.BoxGeometry(4.6, 3.0, 0.2), dark, 0, 1.5, 0.15);
-            for (const sx of [-1, 1]) add(new THREE.CylinderGeometry(0.55, 0.6, fh - 0.2, 20), graniteL, sx * 2.6, (fh - 0.2) / 2, 1.0);
-            add(new THREE.BoxGeometry(7.6, 0.9, 1.6), granite, 0, fh - 0.45, 0.8);
-            const nm = this.charPlane(['樓', '澤', '麗'], 4.6, 0.7, '#e2c26a');   // 由右到左：麗澤樓
-            nm.position.set(0, fh - 0.45, 1.62); g.add(nm);
-            for (let j = 0; j < 3; j++) add(new THREE.BoxGeometry(8.4, 0.14 * (3 - j), 0.6), stone, 0, 0.07 * (3 - j), 1.9 + j * 0.6);
+            const R = 4.6, P = 0.48;                       // 門廊半徑、台階頂高
+            const dbl = (c, r = 0.8) => new THREE.MeshStandardMaterial({ color: c, roughness: r, side: THREE.DoubleSide });
+            const greyPanel = dbl(0xc9c6bf, 0.85), maroon = dbl(0x8e4545, 0.7);
+            const metal = new THREE.MeshStandardMaterial({ color: 0xb8bdc2, roughness: 0.35, metalness: 0.8 });
+            // 朝外（+z）的半圓柱 / 半圓殼
+            const halfCyl = (r, h, y, mat, open = false) => add(new THREE.CylinderGeometry(r, r, h, 40, 1, open, -Math.PI / 2, Math.PI), mat, 0, y, 0);
+
+            // 半圓形台階（四級，越外越低）
+            [6.8, 6.1, 5.4, 4.7].forEach((r, j) => { const m = halfCyl(r, P * (j + 1) / 4, P * (j + 1) / 8, dbl(0x9a918b, 0.95)); m.receiveShadow = true; });
+            // 碰撞：半圓台階（每級 P/4）、右側無障礙坡道、兩根粗圓柱
+            this.addWalkSurface(g, -6.8, 6.8, 0, 6.8, (x, z) => { const d = Math.hypot(x, z); return d <= 4.7 ? P : d <= 5.4 ? P * 0.75 : d <= 6.1 ? P * 0.5 : d <= 6.8 ? P * 0.25 : 0; });
+            this.addWalkSurface(g, 4.7, 13.1, 1.1, 2.7, (x) => P * (13.1 - x) / 8.4);
+            for (let k = 0; k < 4; k++) { const xa = 4.7 + k * 2.1, xb = xa + 2.1; this.addWalkBlocker(g, xa, xb, 2.7, 2.8, P * (13.1 - (xa + xb) / 2) / 8.4 + 0.95); }
+            for (const sx of [-1, 1]) this.addWalkColumn(g, sx * 2.9, 1.5, 0.78);
+            // 大門（暗色玻璃門）
+            add(new THREE.BoxGeometry(5.6, 3.0, 0.2), dark, 0, P + 1.5, 0.15);
+            // 兩根粗圓柱（粉灰花崗岩）＋柱基
+            const H = fh - 0.45 - P;
+            for (const sx of [-1, 1]) {
+                add(new THREE.CylinderGeometry(0.72, 0.78, H, 24), graniteL, sx * 2.9, P + H / 2, 1.5);
+                add(new THREE.CylinderGeometry(0.9, 0.9, 0.2, 24), granite, sx * 2.9, P + 0.1, 1.5);
+            }
+            // 圓弧雨庇（花崗岩）＋上方圓弧陽台欄板（淺灰，帶酒紅飾條）
+            halfCyl(R, 0.9, fh - 0.45, granite);
+            halfCyl(R - 0.12, 1.0, fh + 0.5, greyPanel, true);
+            halfCyl(R - 0.06, 0.12, fh + 0.98, maroon, true);
+            // 金色校名：沿圓弧排列，由右到左讀＝麗澤樓
+            ['樓', '澤', '麗'].forEach((ch, i) => {
+                const th = (i - 1) * 0.42;
+                const c = this.charPlane([ch], 2, 2, '#e2c26a');
+                c.scale.setScalar(0.42);
+                c.position.set(R * Math.sin(th), fh - 0.45, R * Math.cos(th) + 0.03); c.rotation.y = th; g.add(c);
+            });
+            // 左端的直書落款「宋楚瑜」
+            {
+                const cv = document.createElement('canvas'); cv.width = 64; cv.height = 192;
+                const cx2 = cv.getContext('2d'); cx2.fillStyle = '#e2c26a';
+                cx2.font = "bold 56px 'Microsoft JhengHei', 'PMingLiU', serif"; cx2.textAlign = 'center'; cx2.textBaseline = 'middle';
+                ['宋', '楚', '瑜'].forEach((ch, i) => cx2.fillText(ch, 32, 32 + i * 64));
+                const t = new THREE.CanvasTexture(cv); t.colorSpace = THREE.SRGBColorSpace;
+                const sig = new THREE.Mesh(new THREE.PlaneGeometry(0.3, 0.9), new THREE.MeshBasicMaterial({ map: t, transparent: true, depthWrite: false, side: THREE.DoubleSide }));
+                const th = -0.92;
+                sig.position.set(R * Math.sin(th), fh - 0.45, R * Math.cos(th) + 0.03); sig.rotation.y = th; g.add(sig);
+            }
+            // 右側無障礙坡道（斜板＋金屬扶手）
+            {
+                const rl = 8.4, cx0 = 8.9, a = Math.atan2(P, rl);
+                const ramp = add(new THREE.BoxGeometry(rl, 0.2, 1.6), stone, cx0, P / 2 - 0.1, 1.9); ramp.rotation.z = -a; ramp.receiveShadow = true;
+                for (const rz of [2.75, 2.45]) { const rail = add(new THREE.BoxGeometry(rl, 0.04, 0.04), metal, cx0, P / 2 + (rz > 2.6 ? 0.95 : 0.5), rz, false); rail.rotation.z = -a; }
+                for (let k = 0; k < 5; k++) {
+                    const x = 4.9 + k * 2.1, hx = P * (cx0 + rl / 2 - x) / rl;
+                    add(new THREE.CylinderGeometry(0.03, 0.03, 0.95, 6), metal, x, hx + 0.475, 2.75, false);
+                }
+            }
+            // 左側中庭水池（混凝土池緣＋墨綠池水）；位置不夠就不放
+            {
+                const phi = Math.atan2(front.nx, front.nz);
+                const elen = Math.hypot(front.end.x - front.start.x, front.end.z - front.start.z);
+                const sgn = ((front.end.x - front.start.x) * Math.cos(phi) - (front.end.z - front.start.z) * Math.sin(phi)) > 0 ? 1 : -1;
+                const pw = Math.min(11.5, (sgn > 0 ? 0.42 : 0.58) * elen - 9), pd = 5;
+                if (pw >= 5) {
+                    const px = -(8.2 + pw / 2), pz = 5.5;
+                    const rimM = new THREE.MeshStandardMaterial({ color: 0xbab6aa, roughness: 0.9 });
+                    const water = new THREE.Mesh(new THREE.PlaneGeometry(pw, pd), new THREE.MeshStandardMaterial({ color: 0x55704a, roughness: 0.2, metalness: 0.15 }));
+                    water.rotation.x = -Math.PI / 2; water.position.set(px, 0.14, pz); g.add(water);
+                    add(new THREE.BoxGeometry(pw + 0.8, 0.4, 0.4), rimM, px, 0.2, pz - pd / 2 - 0.2);
+                    add(new THREE.BoxGeometry(pw + 0.8, 0.4, 0.4), rimM, px, 0.2, pz + pd / 2 + 0.2);
+                    add(new THREE.BoxGeometry(0.4, 0.4, pd), rimM, px - pw / 2 - 0.2, 0.2, pz);
+                    add(new THREE.BoxGeometry(0.4, 0.4, pd), rimM, px + pw / 2 + 0.2, 0.2, pz);
+                }
+            }
+            // ===== 前牆其他細部（依照片相機座標對位）=====
+            {
+                const phi = Math.atan2(front.nx, front.nz);
+                const fz = front.start.z + (front.end.z - front.start.z) * 0.42;
+                const fx = front.start.x + (front.end.x - front.start.x) * 0.42;
+                const lx = zw => {   // 世界 z → 這面牆的區域 x
+                    const t = (zw - front.start.z) / ((front.end.z - front.start.z) || 1);
+                    const wx = front.start.x + (front.end.x - front.start.x) * t;
+                    return (wx - fx) * Math.cos(phi) + (zw - fz) * (-Math.sin(phi));
+                };
+                const sN = Math.sign(-Math.sin(phi)) || 1;                  // 往北是區域 +x 還是 -x
+                const zN = Math.max(...footprint.map(q => q.z));
+                const conc = new THREE.MeshStandardMaterial({ color: 0xb7b3a9, roughness: 0.95 });
+                const iron = new THREE.MeshStandardMaterial({ color: 0x4a4f52, roughness: 0.5, metalness: 0.6 });
+                const white = new THREE.MeshStandardMaterial({ color: 0xece8de, roughness: 0.7 });
+                const orange = new THREE.MeshStandardMaterial({ color: 0xd97b45, roughness: 0.85 });
+                const meshM = new THREE.MeshStandardMaterial({ color: 0x2c3236, roughness: 0.5 });
+                const glassM = new THREE.MeshStandardMaterial({ color: 0x6f8f92, roughness: 0.15, transparent: true, opacity: 0.65 });
+                const greenRoof = new THREE.MeshStandardMaterial({ color: 0x3f7a62, roughness: 0.6, transparent: true, opacity: 0.9 });
+                // 公布欄櫃（綠色玻璃雨庇）
+                const vitrine = (xc, len) => {
+                    this.addWalkBlocker(g, xc - len / 2, xc + len / 2, 0.1, 0.65, 1.5);
+                    add(new THREE.BoxGeometry(len, 0.5, 0.5), conc, xc, 0.25, 0.4);
+                    add(new THREE.BoxGeometry(len - 0.2, 0.8, 0.1), glassM, xc, 0.9, 0.4, false);
+                    const r = add(new THREE.BoxGeometry(len, 0.08, 0.9), greenRoof, xc, 1.45, 0.5); r.rotation.x = 0.25;
+                };
+                // 鐵欄杆樓梯（6 階，往牆升高；一側混凝土矮牆、一側鐵欄杆）
+                const stairs = (xc, vend) => {
+                    for (let j = 0; j < 6; j++) add(new THREE.BoxGeometry(2.2, 0.17 * (j + 1), 0.3), conc, xc, 0.085 * (j + 1), 0.35 + (5 - j) * 0.3, false).receiveShadow = true;
+                    for (let j = 0; j < 6; j++) { const zc = 0.35 + (5 - j) * 0.3; this.addWalkSurface(g, xc - 1.1, xc + 1.1, zc - 0.15, zc + 0.15, 0.17 * (j + 1)); }   // 6 階（往牆升高）
+                    this.addWalkBlocker(g, xc + sN * 1.2 - 0.11, xc + sN * 1.2 + 0.11, 0, 2.0, 1.25);                                                    // 混凝土矮牆
+                    for (let j = 0; j < 6; j++) { const zc = 0.35 + (5 - j) * 0.3, rxx = xc - sN * 1.2; this.addWalkBlocker(g, rxx - 0.06, rxx + 0.06, zc - 0.15, zc + 0.15, 0.17 * (j + 1) + 0.9); }   // 鐵欄杆
+                    if (vend) this.addWalkBlocker(g, xc + sN * 2.4 - 0.45, xc + sN * 2.4 + 0.45, 0.25, 1.05, 1.9);                                        // 販賣機
+                    add(new THREE.BoxGeometry(2.0, 2.5, 0.12), dark, xc, 1.02 + 1.25, 0.1);
+                    add(new THREE.BoxGeometry(0.22, 1.25, 2.0), conc, xc + sN * 1.2, 0.62, 1.0);
+                    const rx = xc - sN * 1.2;
+                    const rail = add(new THREE.BoxGeometry(0.05, 0.05, 1.72), iron, rx, 1.5, 1.1, false); rail.rotation.x = 0.515;
+                    for (const j of [0, 3, 5]) add(new THREE.CylinderGeometry(0.03, 0.03, 0.9, 6), iron, rx, 0.17 * (j + 1) + 0.45, 0.35 + (5 - j) * 0.3, false);
+                    if (vend) {
+                        add(new THREE.BoxGeometry(0.9, 1.9, 0.8), new THREE.MeshStandardMaterial({ color: 0xcfe3ee, roughness: 0.4 }), xc + sN * 2.4, 0.95, 0.65);
+                        add(new THREE.BoxGeometry(0.7, 1.2, 0.04), new THREE.MeshStandardMaterial({ color: 0x35506b, roughness: 0.3 }), xc + sN * 2.4, 1.1, 1.07, false);
+                    }
+                };
+                // (a) 北段（籃球場、藍色跑道那一側）：白色小門＋公布欄櫃、冷氣室外機、鐵欄杆樓梯＋販賣機
+                const xb = lx(zN - 10);
+                add(new THREE.BoxGeometry(5.8, 2.9, 0.12), dark, xb, 1.45, 0.1);
+                for (let i = 0; i < 6; i++) {
+                    const x = xb + (i - 2.5) * 0.92;
+                    add(new THREE.BoxGeometry(0.8, 2.4, 0.06), white, x, 1.2, 0.2);
+                    add(new THREE.BoxGeometry(0.5, 0.55, 0.03), meshM, x, 1.85, 0.25, false);
+                }
+                for (const sx of [-1, 1]) add(new THREE.BoxGeometry(0.5, 3.1, 0.6), orange, xb + sx * 3.1, 1.55, 0.3);
+                add(new THREE.BoxGeometry(6.7, 0.5, 0.7), orange, xb, 3.3, 0.35);
+                vitrine(xb, 5.4);
+                const acM = new THREE.MeshStandardMaterial({ color: 0xcfd2d4, roughness: 0.6 });
+                const xa = lx(zN - 6.2);
+                for (let k = 0; k < 4; k++) {
+                    const x = xa + (k % 2 - 0.5) * 0.95, y = 0.4 + Math.floor(k / 2) * 0.85;
+                    add(new THREE.BoxGeometry(0.9, 0.75, 0.4), acM, x, y, 0.45);
+                    add(new THREE.BoxGeometry(0.56, 0.5, 0.04), meshM, x, y, 0.67, false);
+                }
+                stairs(lx(zN - 3.4), true);
+                // (b) 正門南側：花崗岩拱窗下的公布欄櫃（在斜坡後面）
+                vitrine(8.6, 7.2);
+                // (c) 南段第二入口：突出的粉灰花崗岩牆（直書「麗澤樓」）＋綠色牆板＋台階＋混凝土矮牆
+                const xw = lx(-38.2);
+                add(new THREE.BoxGeometry(3.0, fh, 1.0), granite, xw, fh / 2, 0.5);
+                this.addWalkBlocker(g, xw - 1.5, xw + 1.5, 0, 1.0, fh);
+                {
+                    const cv = document.createElement('canvas'); cv.width = 80; cv.height = 240;
+                    const c2 = cv.getContext('2d'); c2.fillStyle = '#3a2c28';
+                    c2.font = "bold 66px 'Microsoft JhengHei', 'PMingLiU', serif"; c2.textAlign = 'center'; c2.textBaseline = 'middle';
+                    ['麗', '澤', '樓'].forEach((ch, i) => c2.fillText(ch, 40, 40 + i * 80));
+                    const t = new THREE.CanvasTexture(cv); t.colorSpace = THREE.SRGBColorSpace;
+                    const vt = new THREE.Mesh(new THREE.PlaneGeometry(0.55, 1.65), new THREE.MeshBasicMaterial({ map: t, transparent: true, depthWrite: false, side: THREE.DoubleSide }));
+                    vt.position.set(xw, 2.9, 1.02); g.add(vt);
+                }
+                add(new THREE.BoxGeometry(2.0, 1.2, 0.05), new THREE.MeshStandardMaterial({ color: 0x1f8a4a, roughness: 0.6 }), lx(-41.4), 0.9, 0.06, false);
+                stairs(lx(-43.2), false);
+                add(new THREE.BoxGeometry(1.8, 1.2, 0.3), conc, lx(-45.9), 0.6, 0.4);
+                this.addWalkBlocker(g, lx(-45.9) - 0.9, lx(-45.9) + 0.9, 0.25, 0.55, 1.2);
+            }
             this.scene.add(g);
         }
 
@@ -1681,8 +3240,13 @@ class Game {
             const { g } = this.edgeFrame(south, 0.5);
             const sl = Math.hypot(south.end.x - south.start.x, south.end.z - south.start.z);
             const w = Math.min(6.6, sl * 0.55), h = w * 2;
+            // 照片：灰色大牆板從頂樓一路到二樓，龍浮雕在上半部
+            const bw = Math.min(7.4, sl * 0.62), bh = height * 0.8;
+            const backing = new THREE.Mesh(new THREE.PlaneGeometry(bw, bh), new THREE.MeshStandardMaterial({ color: 0xcfcdc6, roughness: 0.95 }));
+            backing.position.set(0, height - 1.0 - bh / 2, 0.05);
+            g.add(backing);
             const panel = new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshStandardMaterial({ map: this.makeDragonTexture(), bumpMap: this._dragonBump, bumpScale: 2.4, roughness: 0.92 }));
-            panel.position.set(0, height - 1.6 - h / 2, 0.08);
+            panel.position.set(0, height - 2.6 - h / 2, 0.1);
             g.add(panel);
             this.scene.add(g);
             this.buildings.push({ mesh: g, name: '飛龍乘雲', interactive: true });
@@ -1694,15 +3258,90 @@ class Game {
             const { g, add } = this.edgeFrame(north, 0.5);
             const nl = Math.hypot(north.end.x - north.start.x, north.end.z - north.start.z);
             add(new THREE.BoxGeometry(3.4, 2.9, 0.2), dark, 0, 1.45, 0.12);
-            add(new THREE.BoxGeometry(5.2, 0.22, 2.4), granite, 0, 3.2, 1.2);
-            for (const sx of [-1, 1]) add(new THREE.CylinderGeometry(0.2, 0.22, 3.1, 12), graniteL, sx * 2.3, 1.55, 2.2);
-            for (let j = 0; j < 3; j++) add(new THREE.BoxGeometry(5, 0.12 * (3 - j), 0.5), stone, 0, 0.06 * (3 - j), 2.6 + j * 0.5);
             const apronL = 22;
             const apron = new THREE.Mesh(new THREE.PlaneGeometry(nl + 4, apronL), new THREE.MeshStandardMaterial({ color: 0xcfc9bc, roughness: 0.95 }));
             apron.rotation.x = -Math.PI / 2; apron.position.set(0, 0.07, apronL / 2 + 0.2); apron.receiveShadow = true;
             g.add(apron);
             this.scene.add(g);
         }
+    }
+
+    // 麗澤樓背面（照片，校門側、飛龍牆旁）：靠南端的長樓梯（平台往左彎回貼牆走道）＋鐵欄杆＋矮牆＋灌木
+    addLizeBack(footprint) {
+        const n = footprint.length;
+        const cx = footprint.reduce((a, p) => a + p.x, 0) / n;
+        const dx = cx > 0 ? -1 : 1;
+        let best = null;
+        for (let i = 0; i < n; i++) {
+            const a = footprint[i], b = footprint[(i + 1) % n];
+            const nm = this.lizeOutward(footprint, i);
+            if (nm.len < 14 || nm.nx * dx > -0.5) continue;           // 只要背面的長牆
+            const mz = (a.z + b.z) / 2;
+            if (!best || mz < best.mz) best = { a, b, nm, mz };       // 取最南邊（z 最小）那一面
+        }
+        if (!best) return;
+        const S = best.a.z < best.b.z ? best.a : best.b, T = best.a.z < best.b.z ? best.b : best.a;
+        // 面向牆的人：右手邊＝區域 +x，左手邊＝區域 -x。彎回來的走道往「左」(-x)，
+        // 所以從「-x 那一端」往另一端量 5.5 公尺放樓梯，留出彎回來的空間
+        const sgn = Math.sign(-best.nm.nx) || 1;                      // +x 朝北 → -x 朝南 → 從南端量起
+        const A = sgn > 0 ? S : T, B = sgn > 0 ? T : S;
+        const k = 5.5 / best.nm.len;
+        const pos = { x: A.x + (B.x - A.x) * k, z: A.z + (B.z - A.z) * k };
+        const { g, add } = this.edgeFrame({ start: pos, end: pos, nx: best.nm.nx, nz: best.nm.nz }, 0);
+        const conc = new THREE.MeshStandardMaterial({ color: 0xb7b3a9, roughness: 0.95 });
+        const iron = new THREE.MeshStandardMaterial({ color: 0x4a4f52, roughness: 0.5, metalness: 0.6 });
+        const dark = new THREE.MeshStandardMaterial({ color: 0x1f2428, roughness: 0.3, metalness: 0.2 });
+        const leaf = [0x4f7f3a, 0x5d8c45, 0x3f6e33].map(c => new THREE.MeshStandardMaterial({ color: c, roughness: 0.95 }));
+        // 照片：以背面為正面。右邊那條垂直牆面的坡道（寬 2.2、長 L1）慢慢升上一樓平台，門在平台正中央（x=0，與上坡對齊）；
+        // 到了平台之後換「左邊」這條接著下來：貼著麗澤樓外牆往左走（平行牆面）、寬度同樣 2.2、長度只有一半（L1/2），慢慢降回地面
+        const W = 2.2, H = 1.1, L1 = 5.4, L2 = L1 / 2;
+        // 實心楔形坡道（形狀 x＝沿坡方向、y＝高度）
+        const wedge = (pts, x, z, rotY) => {
+            const sh = new THREE.Shape(); sh.moveTo(pts[0][0], pts[0][1]); for (let i = 1; i < pts.length; i++) sh.lineTo(pts[i][0], pts[i][1]);
+            const m = add(new THREE.ExtrudeGeometry(sh, { depth: W, bevelEnabled: false }), conc, x, 0, z, false);
+            m.rotation.y = rotY; m.receiveShadow = true; return m;
+        };
+        // 上坡（右）：離牆方向。擠出朝 -x，所以放在 x=+W/2
+        wedge([[0, 0], [L1, 0], [0, H]], W / 2, W, -Math.PI / 2);
+        // 下坡（左）：貼牆往 -x 方向降，z 從 0 到 W（緊貼外牆），從平台左緣 x=-W/2 起算
+        wedge([[0, 0], [-L2, 0], [0, H]], -W / 2, 0, 0);
+        // 平台（高度 H，貼牆，只有一個坡道寬）
+        add(new THREE.BoxGeometry(W, H, W), conc, 0, H / 2, W / 2);
+        // 一樓的門：x＝0，與上去的坡道對齊
+        add(new THREE.BoxGeometry(2.0, 2.5, 0.12), dark, 0, H + 1.25, 0.1);
+        // 欄杆：上坡兩側（沿 z 斜）、下坡外緣（沿 x 斜，在 z=W）、平台右端與下坡盡頭
+        const railZ = (L, x) => { const r = add(new THREE.BoxGeometry(0.05, 0.05, Math.hypot(L, H)), iron, x, H / 2 + 0.9, W + L / 2, false); r.rotation.x = Math.atan2(H, L); };
+        railZ(L1, W / 2 - 0.05); railZ(L1, -W / 2 + 0.05);
+        const rx = add(new THREE.BoxGeometry(Math.hypot(L2, H), 0.05, 0.05), iron, -W / 2 - L2 / 2, H / 2 + 0.9, W - 0.05, false);
+        rx.rotation.z = Math.atan2(H, L2);
+        add(new THREE.BoxGeometry(0.05, 0.05, W), iron, W / 2 - 0.05, H + 0.9, W / 2, false);   // 平台右端
+        for (const [x, z, y] of [[W / 2 - 0.05, W + L1, 0], [-W / 2 + 0.05, W + L1, 0], [W / 2 - 0.05, W, H], [-W / 2 + 0.05, W, H],
+                                 [-W / 2 - L2, W - 0.05, 0], [W / 2 - 0.05, 0.05, H]])
+            add(new THREE.CylinderGeometry(0.03, 0.03, 0.9, 6), iron, x, y + 0.45, z, false);
+        // ── 碰撞：坡道／平台可走上去，欄杆擋人 ──
+        this.addWalkSurface(g, -W / 2, W / 2, W, W + L1, (x, z) => H * (1 - (z - W) / L1));      // 上坡（右）
+        this.addWalkSurface(g, -W / 2, W / 2, 0, W, H);                                          // 平台（門前）
+        this.addWalkSurface(g, -W / 2 - L2, -W / 2, 0, W, (x) => H * (1 - (-W / 2 - x) / L2));   // 下坡（左，貼牆）
+        const N = 6, tk = 0.06;
+        for (let i = 0; i < N; i++) {
+            const za = W + L1 * i / N, zb = W + L1 * (i + 1) / N, top = H * (1 - ((za + zb) / 2 - W) / L1) + 0.9;
+            this.addWalkBlocker(g, W / 2 - 0.05 - tk, W / 2 - 0.05 + tk, za, zb, top);             // 上坡右欄杆
+            this.addWalkBlocker(g, -W / 2 + 0.05 - tk, -W / 2 + 0.05 + tk, za, zb, top);           // 上坡左欄杆
+            const xa = -W / 2 - L2 * i / N, xb = -W / 2 - L2 * (i + 1) / N, topD = H * (1 - (-W / 2 - (xa + xb) / 2) / L2) + 0.9;
+            this.addWalkBlocker(g, Math.min(xa, xb), Math.max(xa, xb), W - 0.05 - tk, W - 0.05 + tk, topD);   // 下坡外緣欄杆
+        }
+        this.addWalkBlocker(g, W / 2 - 0.05 - tk, W / 2 - 0.05 + tk, 0, W, H + 0.9);             // 平台右端欄杆
+        // 右側（樓梯另一邊）：長長的混凝土矮牆（平行外牆，離牆約 5.5 公尺），牆與矮牆之間種灌木
+        const cl = Math.min(14, best.nm.len - 5.5 - 3 - 2);
+        if (cl > 3) {
+            add(new THREE.BoxGeometry(cl, 0.4, 0.25), conc, 3 + cl / 2, 0.2, 5.5);
+            this.addWalkBlocker(g, 3, 3 + cl, 5.5 - 0.125, 5.5 + 0.125, 0.4);
+            for (let i = 0; i < 11; i++) {
+                const m = add(new THREE.SphereGeometry(0.75, 8, 6), leaf[i % 3], 2.6 + i * 1.2, 0.6, 1.4 + (i % 3) * 1.3, false);
+                m.scale.set(1.2, 0.9, 1.0);
+            }
+        }
+        this.scene.add(g);
     }
 
     // 體育運動館（照片）：屋頂有一條磚紅色欄牆，上面是由右到左的「體育運動館」米色字
@@ -1742,10 +3381,17 @@ class Game {
         add(new THREE.BoxGeometry(9.5, 3.2, 0.3), dark, 0, 1.6, 0.2);
         for (let i = -3; i <= 3; i++) add(new THREE.BoxGeometry(0.07, 3.0, 0.12), metal, i * 1.4, 1.6, 0.4, false);
         for (const sx of [-1, 1]) add(new THREE.CylinderGeometry(0.18, 0.2, fh, 12), light, sx * 5.8, fh / 2, 1.6);
-        for (let j = 0; j < 4; j++) add(new THREE.BoxGeometry(14, 0.15 * (4 - j), 0.6), stone, 0, 0.075 * (4 - j), 2.3 + j * 0.6);
+        for (let j = 0; j < 4; j++) {
+            add(new THREE.BoxGeometry(14, 0.15 * (4 - j), 0.6), stone, 0, 0.075 * (4 - j), 2.3 + j * 0.6);
+            this.addWalkSurface(g, -7, 7, 2.0 + j * 0.6, 2.6 + j * 0.6, 0.15 * (4 - j));
+        }
+        add(new THREE.BoxGeometry(14, 0.6, 1.5), stone, 0, 0.3, 1.25);          // 階梯頂端的平台（門前）
+        this.addWalkSurface(g, -7, 7, 0.5, 2.0, 0.6);
+        for (const sx of [-1, 1]) this.addWalkColumn(g, sx * 5.8, 1.6, 0.2);
         for (const sx of [-1, 1]) {
             add(new THREE.BoxGeometry(0.05, 0.05, 2.6), metal, sx * 2.4, 0.95, 3.5, false);
             for (const z of [2.4, 4.6]) add(new THREE.CylinderGeometry(0.03, 0.03, 0.95, 6), metal, sx * 2.4, 0.5, z, false);
+            this.addWalkBlocker(g, sx * 2.4 - 0.05, sx * 2.4 + 0.05, 2.4, 4.6, 1.0);
         }
         this.scene.add(g);
     }
@@ -3447,6 +5093,7 @@ class Game {
             
             treeGroup.position.set(pos[0], 0, pos[1]);
             this.scene.add(treeGroup);
+            this.coverZones.push({ x: pos[0], z: pos[1], radius: 3.6 });
         });
     }
     
@@ -4028,7 +5675,7 @@ class Game {
         this.controls.cameraAngle = 0;
         this.controls.cameraPitch = 0.3;
         this.playerRadius = 0.45;
-        this.speedMultiplier = 3; // 測試用：移動速度倍率，改回 1 即恢復正常
+        this.speedMultiplier = 1;
         if (this.isMobile) this.setupTouchControls();
     }
     
@@ -4042,13 +5689,14 @@ class Game {
     prepareBuildings() {
         for (const b of this.buildings) {
             b.box = new THREE.Box3().setFromObject(b.mesh);
-            b.solid = !!b.footprint;
+            b.solid = !!b.footprint && !b.customCollision;
             if (b.solid) this.solids.push(b);
         }
     }
     
-    resolveCollisions(pos) {
+    resolveCollisions(pos, enforceCampusBoundary = !this.wantedLevel && !this.isExploringOutsideCampus) {
         const r = this.playerRadius;
+        this.resolveHallCollisions(pos);
         for (let pass = 0; pass < 2; pass++) {
             for (const b of this.solids) {
                 if (!b.footprint) continue;
@@ -4080,7 +5728,30 @@ class Game {
             const dx = pos.x - c.x, dz = pos.z - c.z, d = Math.hypot(dx, dz);
             if (d < c.r + r) { const k = (c.r + r + 0.02) / (d || 1); pos.x = c.x + dx * k; pos.z = c.z + dz * k; }
         }
-        if (this.campusBoundary && !this.isPointInPolygon(pos.x, pos.z, this.campusBoundary)) {
+        for (const barrier of this.wantedRoadblockColliders) {
+            const dx = pos.x - barrier.x, dz = pos.z - barrier.z;
+            const cos = Math.cos(barrier.rotation), sin = Math.sin(barrier.rotation);
+            let localX = dx * cos - dz * sin;
+            let localZ = dx * sin + dz * cos;
+            const closestX = Math.max(-barrier.halfLength, Math.min(barrier.halfLength, localX));
+            const closestZ = Math.max(-barrier.halfWidth, Math.min(barrier.halfWidth, localZ));
+            const offsetX = localX - closestX, offsetZ = localZ - closestZ;
+            const distance = Math.hypot(offsetX, offsetZ);
+            if (distance < r) {
+                if (distance > 0) {
+                    const scale = (r + 0.02) / distance;
+                    localX = closestX + offsetX * scale;
+                    localZ = closestZ + offsetZ * scale;
+                } else if (barrier.halfLength - Math.abs(localX) < barrier.halfWidth - Math.abs(localZ)) {
+                    localX = Math.sign(localX || 1) * (barrier.halfLength + r + 0.02);
+                } else {
+                    localZ = Math.sign(localZ || 1) * (barrier.halfWidth + r + 0.02);
+                }
+                pos.x = barrier.x + localX * cos + localZ * sin;
+                pos.z = barrier.z - localX * sin + localZ * cos;
+            }
+        }
+        if (enforceCampusBoundary && this.campusBoundary && !this.isPointInPolygon(pos.x, pos.z, this.campusBoundary)) {
             const closest = this.closestPointOnPolygon(pos.x, pos.z, this.campusBoundary);
             const centerX = this.campusBoundary.reduce((sum, point) => sum + point.x, 0) / this.campusBoundary.length;
             const centerZ = this.campusBoundary.reduce((sum, point) => sum + point.z, 0) / this.campusBoundary.length;
@@ -4195,6 +5866,7 @@ class Game {
         };
         hold('jump-btn', ' ');
         hold('sprint-btn', 'shift');
+        document.getElementById('vehicle-btn').addEventListener('click', () => this.interactWithVehicle());
     }
     
     rotateCamera(dx, dy, sens) {
@@ -4208,6 +5880,8 @@ class Game {
             const key = e.key.toLowerCase();
             if ([' ', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(key)) e.preventDefault();
             this.controls.keys[key] = true;
+            if (key === 'm' && !e.repeat) this.toggleMinimap();
+            if (key === 'e' && !e.repeat && this.gameState === 'playing') this.interactWithVehicle();
             if (key === 'escape' && !e.repeat) {
                 if (this.gameState === 'paused' || (this.gameState === 'playing' && !document.pointerLockElement)) {
                     this.toggleMenu();
@@ -4232,7 +5906,7 @@ class Game {
         
         document.addEventListener('click', (e) => {
             if (this.isMobile || this.gameState !== 'playing' || document.pointerLockElement) return;
-            if (e.target.closest && e.target.closest('#game-menu')) return;
+            if (e.target.closest && e.target.closest('#game-menu, #minimap')) return;
             this.lockPointer();
         });
         
@@ -4300,39 +5974,74 @@ class Game {
         
         const A = this.controls.cameraAngle, sinA = Math.sin(A), cosA = Math.cos(A);
         const len = Math.hypot(ix, iz);
+        this.updatePlayerAnimation(delta, len > 0 && !this.currentVehicle, p.isSprinting);
+        if (this.currentVehicle) {
+            const vehicle = this.currentVehicle;
+            const accelerationMultiplier = k['shift'] ? vehicle.accelerationMultiplier : 1;
+            const targetSpeed = len > 0 ? vehicle.speed * accelerationMultiplier : 0;
+            const rate = len > 0 ? vehicle.acceleration : vehicle.braking;
+            vehicle.currentSpeed += (targetSpeed - vehicle.currentSpeed) * Math.min(1, rate * delta);
+            this.currentSpeed = vehicle.currentSpeed * Math.min(1, len);
+        } else {
+            this.currentSpeed = len > 0 ? (p.isSprinting ? 5.7 : 3.6) * this.speedMultiplier * Math.min(1, len) : 0;
+        }
+        const speedometer = document.getElementById('speedometer');
+        if (speedometer) speedometer.textContent = `${Math.round(this.currentSpeed * 3.6)} km/h`;
         if (len > 0) {
             const m = Math.min(1, len);
             ix = ix / len * m; iz = iz / len * m;
             // 鏡頭前方 = (sinA, cosA)，右方 = (-cosA, sinA)
             const wx = -iz * sinA - ix * cosA;
             const wz = -iz * cosA + ix * sinA;
-            const speed = (p.isSprinting ? 9 : 5) * this.speedMultiplier * delta;
+            const speed = this.currentSpeed * delta;
             // 分段移動：每段最多 0.4 公尺並逐段檢查碰撞，高速時才不會穿過牆壁
             const steps = Math.max(1, Math.ceil(speed / 0.4));
             for (let i = 0; i < steps; i++) {
+                const ox = p.position.x, oz = p.position.z;
                 p.position.x += wx * speed / steps;
                 p.position.z += wz * speed / steps;
+                if (this.campusBoundary && this.wantedLevel &&
+                    !this.isPointInPolygon(p.position.x, p.position.z, this.campusBoundary)) {
+                    this.isExploringOutsideCampus = true;
+                } else if (this.campusBoundary && !this.wantedLevel &&
+                    this.isPointInPolygon(p.position.x, p.position.z, this.campusBoundary)) {
+                    this.isExploringOutsideCampus = false;
+                }
                 this.resolveCollisions(p.position);
+                this.applyWalkRules(p, ox, oz);
+                this.checkMinorVehicleViolation();
             }
             let diff = Math.atan2(wx, wz) - p.rotation.y;
             diff = Math.atan2(Math.sin(diff), Math.cos(diff));
             p.rotation.y += diff * Math.min(1, 12 * delta);
         }
         
-        if (k[' '] && !p.isJumping) { p.velocity.y = 12; p.isJumping = true; }
+        if (!this.currentVehicle && k[' '] && !p.isJumping) { p.velocity.y = 12; p.isJumping = true; }
         p.velocity.y -= 45 * delta;
         p.position.y += p.velocity.y * delta;
-        if (p.position.y <= this.playerGround) { p.position.y = this.playerGround; p.velocity.y = 0; p.isJumping = false; }
+        const groundY = this.playerGround + this.getGroundY(p.position.x, p.position.z);   // 校史館門檻／台階／坡道／平台
+        if (p.position.y <= groundY) { p.position.y = groundY; p.velocity.y = 0; p.isJumping = false; }
         
         this.resolveCollisions(p.position);
+        this.resolveBlockers(p.position, p.position.y - this.playerGround);
+        if (this.currentVehicle) {
+            this.currentVehicle.mesh.position.set(p.position.x, 0, p.position.z);
+            this.currentVehicle.mesh.rotation.y = p.rotation.y;
+        }
+        this.updatePedestrians(delta);
+        this.updateWanted(delta);
         
-        // 第三人稱鏡頭
+        // 第三人稱鏡頭（角度、距離固定，不會因為牆而改變）
         const d = 6.5, pitch = this.controls.cameraPitch;
         this.camera.position.set(
             p.position.x - sinA * Math.cos(pitch) * d,
             Math.max(0.5, p.position.y + 0.9 + Math.sin(pitch) * d),
             p.position.z - cosA * Math.cos(pitch) * d
         );
+        const head = { x: p.position.x, y: p.position.y + 0.9, z: p.position.z };
+        this.climbCameraOverWalls(head, this.camera.position, delta);
+        this.fitCameraInHall(head, this.camera.position);
+        p.visible = !this.currentVehicle;
         this.camera.lookAt(p.position.x, p.position.y + 0.9, p.position.z);
         
         // 陰影跟著玩家

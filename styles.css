@@ -64,28 +64,79 @@ body {
     width: 100%;
     height: 100%;
     pointer-events: none;
-    z-index: 100;
+    z-index: 260;
 }
 
 #minimap {
     position: absolute;
-    bottom: 20px;
-    right: 20px;
-    width: 200px;
-    height: 200px;
-    background: rgba(0,0,0,0.7);
-    border: 2px solid rgba(255,255,255,0.3);
-    border-radius: 10px;
+    top: calc(env(safe-area-inset-top, 0px) + 14px);
+    right: calc(env(safe-area-inset-right, 0px) + 14px);
+    width: 180px;
+    height: 180px;
+    background: rgba(13, 20, 18, 0.82);
+    border: 2px solid rgba(255,255,255,0.7);
+    border-radius: 50%;
     overflow: hidden;
+    pointer-events: auto;
+    z-index: 350;
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.5);
+}
+
+#minimap-canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+}
+
+#map-toggle {
+    position: absolute;
+    top: 7px;
+    right: 7px;
+    min-width: 48px;
+    min-height: 32px;
+    border: 1px solid rgba(255, 255, 255, 0.75);
+    border-radius: 16px;
+    background: rgba(12, 16, 18, 0.82);
+    color: white;
+    font: inherit;
+    font-size: 12px;
+    pointer-events: auto;
+    cursor: pointer;
+}
+
+#minimap.expanded {
+    top: 50%;
+    right: auto;
+    left: 50%;
+    width: min(78vw, 380px);
+    height: min(78vw, 380px);
+    transform: translate(-50%, -50%);
 }
 
 #map-credit {
     position: absolute;
-    right: 22px;
-    bottom: 224px;
+    top: 202px;
+    right: 18px;
     color: rgba(255, 255, 255, 0.78);
     font-size: 11px;
     text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+    pointer-events: none;
+}
+
+#speedometer {
+    position: absolute;
+    top: calc(env(safe-area-inset-top, 0px) + 12px);
+    left: calc(env(safe-area-inset-left, 0px) + 14px);
+    padding: 8px 12px;
+    border: 1px solid rgba(255, 255, 255, 0.65);
+    border-radius: 8px;
+    background: rgba(10, 15, 18, 0.78);
+    color: #fff;
+    font-size: 1.1rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+    pointer-events: none;
 }
 
 #player-info {
@@ -119,9 +170,16 @@ body {
     text-shadow: 1px 1px 2px rgba(0,0,0,0.8);
 }
 
+#wanted-status {
+    color: #ff6666;
+    font-size: 0.95rem;
+    font-weight: bold;
+    text-shadow: 1px 1px 3px rgba(0, 0, 0, 0.95);
+}
+
 #controls-hint {
     position: absolute;
-    top: 20px;
+    top: 68px;
     left: 20px;
     color: white;
     font-size: 0.9rem;
@@ -277,6 +335,13 @@ body {
 body { touch-action: none; user-select: none; -webkit-user-select: none; }
 .is-mobile #controls-hint { display: none; }
 
+.is-mobile #speedometer {
+    top: calc(env(safe-area-inset-top, 0px) + 10px);
+    left: calc(env(safe-area-inset-left, 0px) + 10px);
+    padding: 6px 9px;
+    font-size: 0.95rem;
+}
+
 #toast {
     position: absolute;
     top: 12%;
@@ -295,3 +360,44 @@ body { touch-action: none; user-select: none; -webkit-user-select: none; }
     z-index: 400;
 }
 #toast.show { opacity: 1; }
+
+body.is-mobile #minimap {
+    top: calc(env(safe-area-inset-top, 0px) + 10px);
+    right: calc(env(safe-area-inset-right, 0px) + 10px);
+    width: clamp(108px, 28vw, 146px);
+    height: clamp(108px, 28vw, 146px);
+}
+
+body.is-mobile #minimap.expanded {
+    top: 50%;
+    right: auto;
+    width: min(84vw, 380px);
+    height: min(84vw, 380px);
+}
+
+.is-mobile #map-credit {
+    display: none;
+}
+
+.is-mobile #player-info {
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 150px);
+    left: 14px;
+    gap: 6px;
+}
+
+.is-mobile .health-bar {
+    width: 140px;
+    height: 14px;
+}
+
+@media (max-height: 430px) {
+    body.is-mobile #minimap {
+        width: 112px;
+        height: 112px;
+    }
+
+    body.is-mobile #minimap.expanded {
+        width: min(78vh, 340px);
+        height: min(78vh, 340px);
+    }
+}
